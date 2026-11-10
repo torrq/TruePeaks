@@ -1,7 +1,6 @@
 use crate::decoder::SpeakerChannel;
 
 pub struct DrPmfAccumulator {
-    sample_rate: u32,
     num_channels: usize,
     channels: Vec<SpeakerChannel>,
     block_frames: usize,
@@ -35,7 +34,6 @@ impl DrPmfAccumulator {
         let num_channels = channels.len().max(1);
         let block_frames = pmf_block_frames(sample_rate);
         Self {
-            sample_rate,
             num_channels,
             channels: channels.to_vec(),
             block_frames,
@@ -119,10 +117,7 @@ impl DrPmfAccumulator {
             peaks_list.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
             let m = ((k as f64 * 0.20).floor() as usize).max(1);
-            let nominal_3s_frames = (3 * self.sample_rate.max(1) as usize) as f64;
-            let dr_denom_scale = (self.block_frames as f64) / nominal_3s_frames;
-            let mean_top_rms_sq: f64 =
-                (rms_sq_list[..m].iter().sum::<f64>() * dr_denom_scale) / (m as f64);
+            let mean_top_rms_sq: f64 = rms_sq_list[..m].iter().sum::<f64>() / (m as f64);
             let r_20 = mean_top_rms_sq.sqrt();
 
             let p_2 = if peaks_list.len() >= 2 {

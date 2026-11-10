@@ -9,7 +9,6 @@ pub fn format_single_file_log(track: &TrackAnalysis, rows_cfg: &SingleFileRowsCo
     // Leading empty line
     lines.push(String::new());
     lines.push(format!("File Name:     {}", track.file_stem));
-    lines.push(format!("Absolute Path: {}", track.absolute_path.display()));
     lines.push(format!("File Format:   {}", track.file_format));
 
     let num_ch = track.channels.len().max(1);

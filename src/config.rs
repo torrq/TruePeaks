@@ -80,6 +80,41 @@ impl SurroundFolderMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeMode {
+    System,
+    Dark,
+    Light,
+}
+
+impl Default for ThemeMode {
+    fn default() -> Self {
+        Self::System
+    }
+}
+
+impl ThemeMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ThemeMode::System => "System Default",
+            ThemeMode::Dark => "Dark",
+            ThemeMode::Light => "Light",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ThemeMode::System => ThemeMode::Dark,
+            ThemeMode::Dark => ThemeMode::Light,
+            ThemeMode::Light => ThemeMode::System,
+        }
+    }
+
+    pub fn all() -> &'static [ThemeMode] {
+        &[ThemeMode::System, ThemeMode::Dark, ThemeMode::Light]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FolderColumnsConfig {
@@ -163,6 +198,98 @@ impl Default for FolderColumnsConfig {
     }
 }
 
+impl FolderColumnsConfig {
+    /// Compact DR-only preset (Track Name, DR PMF, DR L/R, Max TPL, LUFSi).
+    pub fn minimal() -> Self {
+        Self {
+            max_tpl_left: false,
+            max_tpl_right: false,
+            ..Self::default()
+        }
+    }
+
+    /// Loudness & dynamics preset focused on modern BS.1770 mastering metrics.
+    pub fn mastering() -> Self {
+        Self {
+            max_tpl_left: false,
+            max_tpl_right: false,
+            dr_left: false,
+            dr_right: false,
+            lra: true,
+            max_mom_itu: true,
+            max_short_term_itu: true,
+            plr: true,
+            min_psr: true,
+            ..Self::default()
+        }
+    }
+
+    /// Enable every available measurement column in the folder summary table.
+    pub fn all_enabled() -> Self {
+        Self {
+            file_name: true,
+            file_format: true,
+            sample_rate: true,
+            word_length: true,
+            bits_used: true,
+            dr_pmf: true,
+            dr_left: true,
+            dr_right: true,
+            max_tpl_itu: true,
+            max_tpl_left: true,
+            max_tpl_right: true,
+            lufsi: true,
+            lra: true,
+            max_mom_itu: true,
+            max_short_term_itu: true,
+            max_mom_left: true,
+            max_mom_right: true,
+            max_short_term_left: true,
+            max_short_term_right: true,
+            max_sppm_joint: true,
+            max_sppm_left: true,
+            max_sppm_right: true,
+            rms_left: true,
+            rms_right: true,
+            plr: true,
+            min_psr: true,
+        }
+    }
+
+    /// Returns `(active_columns, total_columns)`.
+    pub fn active_count(&self) -> (usize, usize) {
+        let flags = [
+            self.file_name,
+            self.file_format,
+            self.sample_rate,
+            self.word_length,
+            self.bits_used,
+            self.dr_pmf,
+            self.dr_left,
+            self.dr_right,
+            self.max_tpl_itu,
+            self.max_tpl_left,
+            self.max_tpl_right,
+            self.lufsi,
+            self.lra,
+            self.max_mom_itu,
+            self.max_short_term_itu,
+            self.max_mom_left,
+            self.max_mom_right,
+            self.max_short_term_left,
+            self.max_short_term_right,
+            self.max_sppm_joint,
+            self.max_sppm_left,
+            self.max_sppm_right,
+            self.rms_left,
+            self.rms_right,
+            self.plr,
+            self.min_psr,
+        ];
+        (flags.iter().filter(|&&f| f).count(), flags.len())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SingleFileRowsConfig {
@@ -203,6 +330,8 @@ pub struct AppConfig {
     pub surround_folder_mode: SurroundFolderMode,
     pub include_lfe_in_dr: bool,
     pub max_threads: usize,
+    pub theme: ThemeMode,
+    pub log_font_size: f32,
     pub charset: CharsetMode,
     pub line_ending: LineEndingMode,
     pub folder_log_pattern: String,
@@ -221,9 +350,11 @@ impl Default for AppConfig {
             surround_folder_mode: SurroundFolderMode::ExpandPerChannel,
             include_lfe_in_dr: false,
             max_threads: max_cores,
+            theme: ThemeMode::System,
+            log_font_size: 13.5,
             charset: CharsetMode::Utf8,
             line_ending: LineEndingMode::Crlf,
-            folder_log_pattern: "{folder_name}_log.txt".to_string(),
+            folder_log_pattern: "DR.txt".to_string(),
             single_log_pattern: "{file_name}_log.txt".to_string(),
             save_logs_to_disk: true,
         }
@@ -244,6 +375,11 @@ impl AppConfig {
                         .map(|n| n.get())
                         .unwrap_or(4);
                     cfg.max_threads = cfg.max_threads.clamp(1, max_cores);
+                    if !cfg.log_font_size.is_finite() {
+                        cfg.log_font_size = 13.5;
+                    } else {
+                        cfg.log_font_size = cfg.log_font_size.clamp(10.0, 22.0);
+                    }
                     return cfg;
                 }
             }

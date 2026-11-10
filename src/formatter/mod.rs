@@ -21,6 +21,24 @@ pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
 }
 
+pub fn folder_display_name(dir: &Path, fallback: &str) -> String {
+    let canonical = fs::canonicalize(dir);
+    let resolved = canonical.as_deref().unwrap_or(dir);
+    resolved
+        .file_name()
+        .map(|s| normalize_nfc(&s.to_string_lossy()))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let raw = resolved.to_string_lossy();
+            let trimmed = raw.strip_prefix(r"\\?\").unwrap_or(&raw).trim();
+            if trimmed.is_empty() {
+                fallback.to_string()
+            } else {
+                normalize_nfc(trimmed)
+            }
+        })
+}
+
 pub fn visual_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
@@ -112,7 +130,7 @@ pub fn expand_filename_pattern(
         if let Some(fn_str) = file_name {
             format!("{}_log.txt", fn_str)
         } else {
-            format!("{}_log.txt", folder_name)
+            "DR.txt".to_string()
         }
     } else {
         out

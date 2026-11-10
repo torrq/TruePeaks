@@ -33,146 +33,240 @@ mod tests {
     use crate::dsp::analyze_file;
     use crate::formatter::folder_log::format_folder_log;
     use crate::formatter::single_log::format_single_file_log;
+    use std::io::Write;
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
     use unicode_width::UnicodeWidthStr;
 
+    fn write_pcm24_stereo_wav(path: &Path, sr: u32, l: &[f64], r: &[f64]) {
+        let n = l.len().min(r.len());
+        let data_size = (n * 6) as u32;
+        let mut f = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        f.write_all(b"RIFF").unwrap();
+        f.write_all(&(36 + data_size).to_le_bytes()).unwrap();
+        f.write_all(b"WAVEfmt ").unwrap();
+        f.write_all(&16u32.to_le_bytes()).unwrap();
+        f.write_all(&1u16.to_le_bytes()).unwrap();
+        f.write_all(&2u16.to_le_bytes()).unwrap();
+        f.write_all(&sr.to_le_bytes()).unwrap();
+        f.write_all(&(sr * 6).to_le_bytes()).unwrap();
+        f.write_all(&6u16.to_le_bytes()).unwrap();
+        f.write_all(&24u16.to_le_bytes()).unwrap();
+        f.write_all(b"data").unwrap();
+        f.write_all(&data_size.to_le_bytes()).unwrap();
+        for i in 0..n {
+            for s in [l[i], r[i]] {
+                let q = (s * 8388608.0).round().clamp(-8388608.0, 8388607.0) as i32;
+                let le = q.to_le_bytes();
+                f.write_all(&le[0..3]).unwrap();
+            }
+        }
+    }
+
+    fn gen_sine(sr: u32, secs: usize, freq: f64, amp: f64) -> Vec<f64> {
+        let n = (sr as usize) * secs;
+        (0..n)
+            .map(|i| amp * (2.0 * std::f64::consts::PI * freq * (i as f64) / (sr as f64)).sin())
+            .collect()
+    }
+
     #[test]
-    fn test_golden_stereo_reference_parity_and_unicode_alignment() {
+    fn test_bs1770_calibration_and_continuous_sliding_loudness() {
+        use crate::dsp::loudness::LoudnessAnalyzer;
+
+        // Verify ITU-R BS.1770-4 calibration: 997 Hz -20.00 dBFS stereo sine (amp = 0.1)
+        // Must measure -20.00 LUFS for LUFSi, Momentary, and Short-Term (with PSR ~ 0.00)
+        for &(sr, tol) in &[(44_100u32, 0.005_f64), (48_000u32, 0.001_f64)] {
+            let channels = vec![SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight];
+            let mut analyzer = LoudnessAnalyzer::new(sr, &channels).unwrap();
+            let total_frames = (sr as usize) * 5;
+            let mut buf = Vec::with_capacity(8192 * 2);
+            let mut idx = 0usize;
+            while idx < total_frames {
+                let take = (total_frames - idx).min(8192);
+                buf.clear();
+                for _ in 0..take {
+                    let v = 0.1
+                        * (2.0 * std::f64::consts::PI * 997.0 * (idx as f64) / (sr as f64)).sin();
+                    buf.push(v);
+                    buf.push(v);
+                    idx += 1;
+                }
+                analyzer.process_frames(&buf, take);
+            }
+            let res = analyzer.finalize();
+            assert!(
+                (res.integrated_lufs - (-20.0)).abs() < tol,
+                "LUFSi calibration failed at {} Hz: {}",
+                sr,
+                res.integrated_lufs
+            );
+            assert!(
+                (res.max_short_term_joint - (-20.0)).abs() < tol + 0.01,
+                "Short-Term calibration failed at {} Hz: {}",
+                sr,
+                res.max_short_term_joint
+            );
+            assert!(
+                (res.max_momentary_joint - (-20.0)).abs() < tol + 0.02,
+                "Momentary calibration failed at {} Hz: {}",
+                sr,
+                res.max_momentary_joint
+            );
+            assert!(
+                res.min_psr.abs() < 0.05,
+                "Sine PSR should be ~0.00 dB at {} Hz, got {}",
+                sr,
+                res.min_psr
+            );
+        }
+
+        // Verify K-weighting frequency response (100 Hz ~ -21.82 LUFS, 5 kHz ~ -16.67 LUFS @ -20 dBFS)
+        for &(freq, expected_lufs) in &[(100.0_f64, -21.82_f64), (5000.0_f64, -16.67_f64)] {
+            let channels = vec![SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight];
+            let mut analyzer = LoudnessAnalyzer::new(44_100, &channels).unwrap();
+            let sig = gen_sine(44_100, 4, freq, 0.1);
+            let interleaved: Vec<f64> = sig.iter().flat_map(|&s| [s, s]).collect();
+            analyzer.process_frames(&interleaved, sig.len());
+            let res = analyzer.finalize();
+            assert!(
+                (res.integrated_lufs - expected_lufs).abs() < 0.02,
+                "K-weighting failed at {} Hz: expected {}, got {}",
+                freq,
+                expected_lufs,
+                res.integrated_lufs
+            );
+        }
+
+        // Verify continuous sample-sliding Momentary captures an isolated mid-hop 30 ms burst cleanly
+        {
+            let channels = vec![SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight];
+            let mut analyzer = LoudnessAnalyzer::new(44_100, &channels).unwrap();
+            let mut sig = gen_sine(44_100, 3, 997.0, 0.056234); // -25 dBFS bed
+            let start = (44_100.0 * 1.045) as usize; // intentionally offset between 100 ms grid points
+            for j in 0..1323 {
+                sig[start + j] =
+                    0.794328 * (2.0 * std::f64::consts::PI * 4000.0 * (j as f64) / 44_100.0).sin(); // -2 dBFS 4 kHz burst
+            }
+            let interleaved: Vec<f64> = sig.iter().flat_map(|&s| [s, s]).collect();
+            analyzer.process_frames(&interleaved, sig.len());
+            let res = analyzer.finalize();
+            assert!(
+                res.max_momentary_joint > -11.5,
+                "Expected continuous sliding Momentary peak > -11.5 LUFS, got {}",
+                res.max_momentary_joint
+            );
+        }
+    }
+
+    #[test]
+    fn test_generated_album_dr_formatting_and_unicode_alignment() {
         let cancel = AtomicBool::new(false);
         let cfg = AppConfig::default();
+        let album_dir = std::env::temp_dir().join("truepeaks_album_tests");
+        let _ = std::fs::remove_dir_all(&album_dir);
+        std::fs::create_dir_all(&album_dir).unwrap();
 
-        let albums = [
-            (
-                r"scratch\Red Hot Chili Peppers - Stadium Arcadium (2006)",
-                r"scratch\Red Hot Chili Peppers - Stadium Arcadium (2006)\Red Hot Chili Peppers - Stadium Arcadium (2006)_log.txt",
-                5,
-            ),
-            (
-                r"scratch\Electric Light Orchestra - Eldorado (1974)",
-                r"scratch\Electric Light Orchestra - Eldorado (1974)\Electric Light Orchestra - Eldorado (1974)_log.txt",
-                11,
-            ),
-        ];
-
-        for (dir_str, ref_folder_log_str, expected_album_dr) in albums {
-            let dir = Path::new(dir_str);
-            if !dir.exists() {
-                continue;
-            }
-            let mut wav_files: Vec<_> = std::fs::read_dir(dir)
-                .unwrap()
-                .filter_map(|e| e.ok().map(|d| d.path()))
-                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("wav"))
-                .collect();
-            wav_files.sort();
-
-            let mut tracks = Vec::with_capacity(wav_files.len());
-            for wav_p in &wav_files {
-                let track = analyze_file(wav_p, false, &cancel).expect("Failed to analyze WAV");
-                let stem = wav_p.file_stem().unwrap().to_str().unwrap();
-                let ref_single_path = wav_p.with_file_name(format!("{}_log.txt", stem));
-                let ref_single = std::fs::read_to_string(&ref_single_path).unwrap();
-
-                let gen_single = format_single_file_log(&track, &cfg.single_rows);
-
-                // Verify line-by-line structural width & exact RMS / SPPM / Bits Used / DR (PMF)
-                let ref_lines: Vec<&str> = ref_single.lines().collect();
-                let gen_lines: Vec<&str> = gen_single.lines().collect();
-                assert_eq!(ref_lines.len(), gen_lines.len(), "Line count mismatch on {}", stem);
-
-                // Header lines 5, 6, 8 (0-indexed) are 100 chars; metric lines 9..19 are 106 chars
-                assert_eq!(gen_lines[5].len(), 100, "Sample Rate header width on {}", stem);
-                assert_eq!(gen_lines[6].len(), 100, "Sample Rate values width on {}", stem);
-                assert_eq!(gen_lines[8].len(), 100, "Left/Right/Joint header width on {}", stem);
-                for row_idx in 9..19 {
-                    assert_eq!(
-                        gen_lines[row_idx].len(),
-                        106,
-                        "Metric row {} width mismatch on {}",
-                        row_idx,
-                        stem
-                    );
+        let make_dr_track = |fname: &str, target_dr: f64| {
+            let b = 132_480usize; // 44.1 kHz PMF block length
+            let top_amp = 10.0_f64.powf(-target_dr / 20.0);
+            let mut l = Vec::with_capacity(10 * b);
+            let mut r = Vec::with_capacity(10 * b);
+            for blk in 0..10 {
+                let scale = if blk < 2 { 1.0 } else { 0.25 };
+                for j in 0..b {
+                    let t = ((blk * b + j) as f64) / 44_100.0;
+                    let s = top_amp * scale * (2.0 * std::f64::consts::PI * 997.0 * t).sin();
+                    let sample = if blk < 2 && j == 1000 { 0.999999 } else { s };
+                    l.push(sample);
+                    r.push(sample);
                 }
-
-                // Exact match on Sample Rate / Word Length / Bits Used values line (6)
-                assert_eq!(gen_lines[6], ref_lines[6], "Metadata values mismatch on {}", stem);
-                // Exact match on Max. SPPM line (10) (treating -0.00 dBFS and 0.00 dBFS as equivalent 0.00 dBFS)
-                assert_eq!(
-                    gen_lines[10].replace("-0.00 dBFS", " 0.00 dBFS"),
-                    ref_lines[10].replace("-0.00 dBFS", " 0.00 dBFS"),
-                    "Max. SPPM mismatch on {}",
-                    stem
-                );
-                // Exact match on RMS line (11) across all 24 tracks (48 channels)
-                assert_eq!(gen_lines[11], ref_lines[11], "AES17 RMS mismatch on {}", stem);
-                // Exact match on DR (PMF) Joint column (line 15) across all 24 tracks
-                assert_eq!(
-                    &gen_lines[15][87..],
-                    &ref_lines[15][87..],
-                    "Joint DR (PMF) mismatch on {}",
-                    stem
-                );
-
-                tracks.push(track);
             }
+            write_pcm24_stereo_wav(&album_dir.join(fname), 44_100, &l, &r);
+        };
 
-            // Compute Official EP/Album DR from unrounded track DR mean
-            let mean_dr: f64 =
-                tracks.iter().map(|t| t.dr_track_raw).sum::<f64>() / (tracks.len() as f64);
-            assert_eq!(
-                mean_dr.round() as i32,
-                expected_album_dr,
-                "Official EP/Album DR mismatch for {}",
-                dir_str
+        make_dr_track("01 - Track\u{2019}s Title.wav", 8.0);
+        make_dr_track("02 - \u{65e5}\u{672c}\u{8a9e}\u{30c8}\u{30e9}\u{30c3}\u{30af} \u{2014} \u{442}\u{435}\u{441}\u{442}.wav", 10.0);
+        make_dr_track("03 - Caf\u{00e9} Cr\u{00e8}me.wav", 12.0);
+
+        let mut files: Vec<_> = std::fs::read_dir(&album_dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|d| d.path()))
+            .collect();
+        files.sort();
+
+        let expected_drs = [8.0_f64, 10.0, 12.0];
+        let mut tracks = Vec::with_capacity(files.len());
+        for (p, &exp_dr) in files.iter().zip(&expected_drs) {
+            let track = analyze_file(p, false, &cancel).unwrap();
+            assert!(
+                (track.dr_channels[0] - exp_dr).abs() < 0.02,
+                "DR_L mismatch on {}: got {}",
+                track.file_stem,
+                track.dr_channels[0]
             );
+            assert_eq!(track.word_length, Some(24));
+            assert_eq!(track.bits_used, Some(24));
+            assert!(track.max_tpl_joint >= track.max_sppm_joint - 0.01);
 
-            // Generate Folder Log and verify visual column alignment (`|` pipe positions)
-            let gen_folder = format_folder_log(
-                dir,
-                &tracks,
-                &cfg.folder_columns,
-                cfg.surround_folder_mode,
-            );
-            let ref_folder = std::fs::read_to_string(ref_folder_log_str).unwrap();
-            let gen_flines: Vec<&str> = gen_folder.lines().collect();
-            let ref_flines: Vec<&str> = ref_folder.lines().collect();
-            assert_eq!(gen_flines.len(), ref_flines.len());
+            let single_log = format_single_file_log(&track, &cfg.single_rows);
+            let lines: Vec<&str> = single_log.lines().collect();
+            assert!(!single_log.contains("Absolute Path:"));
+            assert_eq!(lines.len(), 18, "Single log line count mismatch");
+            assert_eq!(lines[4].len(), 100);
+            assert_eq!(lines[5].len(), 100);
+            assert_eq!(lines[7].len(), 100);
+            for row_idx in 8..18 {
+                assert_eq!(lines[row_idx].len(), 106, "Metric row {} width mismatch", row_idx);
+            }
+            tracks.push(track);
+        }
 
-            // Check that Official EP/Album DR line matches exactly
-            assert_eq!(
-                gen_flines.last().unwrap(),
-                ref_flines.last().unwrap(),
-                "Official EP/Album DR footer line mismatch in {}",
-                dir_str
-            );
+        let mean_dr: f64 = tracks.iter().map(|t| t.dr_track_raw).sum::<f64>() / (tracks.len() as f64);
+        assert_eq!(mean_dr.round() as i32, 10);
 
-            // Verify that every table row (header + all track rows) has identical visual pipe column offsets,
-            // including tracks with multi-byte Unicode right-single-quotation marks (U+2019 ’)
-            let header_line = gen_flines[3];
-            let expected_pipes: Vec<usize> = header_line
+        let folder_log = format_folder_log(
+            &album_dir,
+            &tracks,
+            &cfg.folder_columns,
+            cfg.surround_folder_mode,
+        );
+        let flines: Vec<&str> = folder_log.lines().collect();
+        assert_eq!(flines[1], "truepeaks_album_tests");
+        assert!(!flines[1].contains("Folder Path:"));
+        assert_eq!(cfg.folder_log_pattern, "DR.txt");
+        assert_eq!(
+            crate::formatter::expand_filename_pattern(
+                &cfg.folder_log_pattern,
+                "truepeaks_album_tests",
+                None,
+                None,
+                Some(10),
+            ),
+            "DR.txt"
+        );
+        assert_eq!(flines.last().copied(), Some("Official EP/Album DR: 10"));
+
+        let header_line = flines[3];
+        let expected_pipes: Vec<usize> = header_line
+            .split('|')
+            .scan(0usize, |acc, seg| {
+                *acc += UnicodeWidthStr::width(seg) + 1;
+                Some(*acc)
+            })
+            .collect();
+        for row_line in &flines[5..5 + tracks.len()] {
+            let row_pipes: Vec<usize> = row_line
                 .split('|')
                 .scan(0usize, |acc, seg| {
                     *acc += UnicodeWidthStr::width(seg) + 1;
                     Some(*acc)
                 })
                 .collect();
-
-            for row_line in &gen_flines[5..5 + tracks.len()] {
-                let row_pipes: Vec<usize> = row_line
-                    .split('|')
-                    .scan(0usize, |acc, seg| {
-                        *acc += UnicodeWidthStr::width(seg) + 1;
-                        Some(*acc)
-                    })
-                    .collect();
-                assert_eq!(
-                    row_pipes, expected_pipes,
-                    "Visual pipe alignment mismatch on row: {}",
-                    row_line
-                );
-            }
+            assert_eq!(row_pipes, expected_pipes, "Visual alignment mismatch: {}", row_line);
         }
+
+        let _ = std::fs::remove_dir_all(&album_dir);
     }
 
     #[test]
@@ -413,11 +507,13 @@ mod tests {
         );
 
         // Verify Single-File Log dynamically scales width for 6 channels (49 + 7 * 19 = 182 chars)
-        // Note: For >2 channels, Line 4 is "Channel Layout: ...", so metric rows start at Line 10
+        // Note: For >2 channels, Line 3 is "Channel Layout: ...", so metric rows start at Line 9
         let mut cfg = AppConfig::default();
         let single_log = format_single_file_log(&track_no_lfe_dr, &cfg.single_rows);
+        assert!(!single_log.contains("Absolute Path:"));
         let s_lines: Vec<&str> = single_log.lines().collect();
-        assert_eq!(s_lines[10].len(), 49 + 7 * 19);
+        assert!(s_lines[3].starts_with("Channel Layout:"));
+        assert_eq!(s_lines[9].len(), 49 + 7 * 19);
 
         // Verify Surround Folder Log expanded mode works cleanly
         cfg.surround_folder_mode = SurroundFolderMode::ExpandPerChannel;
@@ -432,8 +528,223 @@ mod tests {
         assert!(folder_log.contains("TPL L"));
         assert!(folder_log.contains("TPL LFE"));
         assert!(folder_log.contains("DR LFE"));
+        assert_eq!(
+            folder_log.lines().nth(1),
+            temp_dir.file_name().and_then(|s| s.to_str())
+        );
+        assert_eq!(
+            crate::formatter::expand_filename_pattern("  ", "Album", None, None, Some(10)),
+            "DR.txt"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_true_peak_16x_sinc_and_diagnostic_probes() {
+        let bessel_i0 = |x: f64| -> f64 {
+            let mut sum = 1.0;
+            let mut term = 1.0;
+            let y = x * x / 4.0;
+            for k in 1..28 {
+                term *= y / ((k * k) as f64);
+                sum += term;
+            }
+            sum
+        };
+        let beta = 9.0_f64;
+        let i0_beta = bessel_i0(beta);
+        const HALF_TAPS: isize = 24;
+        const KERNEL_LEN: usize = 49;
+        let mut phases = vec![[0.0_f64; KERNEL_LEN]; 16];
+        let mut l1_bound = 0.0_f64;
+        for sub in 0..16 {
+            let frac = (sub as f64) / 16.0;
+            let mut wsum = 0.0;
+            for (idx, k) in (-HALF_TAPS..=HALF_TAPS).enumerate() {
+                let d = frac - (k as f64);
+                let alpha = d / (HALF_TAPS as f64 + 0.5);
+                let c = if alpha.abs() < 1.0 {
+                    let w = bessel_i0(beta * (1.0 - alpha * alpha).sqrt()) / i0_beta;
+                    let sinc = if d.abs() < 1e-12 {
+                        1.0
+                    } else {
+                        let x = std::f64::consts::PI * d;
+                        x.sin() / x
+                    };
+                    w * sinc
+                } else {
+                    0.0
+                };
+                phases[sub][idx] = c;
+                wsum += c;
+            }
+            let mut l1 = 0.0_f64;
+            for v in &mut phases[sub] {
+                *v /= wsum;
+                l1 += v.abs();
+            }
+            if l1 > l1_bound {
+                l1_bound = l1;
+            }
+        }
+
+        let whole_file_16x_sinc_max = |samples: &[f64]| -> f64 {
+            let n = samples.len();
+            let mut best = samples.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+            const BLK: usize = 32;
+            let n_blks = (n + BLK - 1) / BLK;
+            let blk_max: Vec<f64> = (0..n_blks)
+                .map(|b| {
+                    let s = b * BLK;
+                    let e = ((b + 1) * BLK).min(n);
+                    samples[s..e].iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()))
+                })
+                .collect();
+            for b in 0..n_blks {
+                let left_m = if b > 0 { blk_max[b - 1] } else { 0.0 };
+                let mid_m = blk_max[b];
+                let right_m = if b + 1 < n_blks { blk_max[b + 1] } else { 0.0 };
+                if left_m.max(mid_m).max(right_m) * l1_bound <= best {
+                    continue;
+                }
+                let s = b * BLK;
+                let e = ((b + 1) * BLK).min(n);
+                for pos in s..e {
+                    if pos >= HALF_TAPS as usize && pos + (HALF_TAPS as usize) < n {
+                        let win = &samples[pos - HALF_TAPS as usize..=pos + HALF_TAPS as usize];
+                        for coeffs in phases.iter().skip(1) {
+                            let acc: f64 = win.iter().zip(coeffs.iter()).map(|(&w, &c)| w * c).sum();
+                            let val = acc.abs();
+                            if val > best {
+                                best = val;
+                            }
+                        }
+                    }
+                }
+            }
+            20.0 * best.log10()
+        };
+
+        let cancel = AtomicBool::new(false);
+        let diag_dir = std::env::temp_dir().join("truepeaks_diag_tests");
+        let _ = std::fs::remove_dir_all(&diag_dir);
+        std::fs::create_dir_all(&diag_dir).unwrap();
+
+        // 05: Exact ITU fs/4 Inter-Sample Peak (-9.03 dBFS samples, ~ -6.02 dBTP continuous)
+        let isp_fs4: Vec<f64> = (0..44_100 * 4)
+            .map(|i| 0.5 * (std::f64::consts::FRAC_PI_2 * (i as f64) + std::f64::consts::FRAC_PI_4).sin())
+            .collect();
+        let p05 = diag_dir.join("05_isp_fs4.wav");
+        write_pcm24_stereo_wav(&p05, 44_100, &isp_fs4, &isp_fs4);
+        let t05 = analyze_file(&p05, false, &cancel).unwrap();
+        assert!((t05.max_sppm_joint - (-9.03)).abs() < 0.02);
+        assert!(t05.max_tpl_joint > -6.10 && t05.max_tpl_joint < -5.85);
+
+        // 06: Clipped high-frequency intersample burst vs whole-file 16x Kaiser Sinc
+        let mut clipped_isp = gen_sine(44_100, 4, 440.0, 0.2);
+        let burst = [-0.75, -0.85, -0.50, -0.9999, -0.996, -0.40, -0.9999, -0.75, -0.90, -0.999];
+        for (k, &v) in burst.iter().enumerate() {
+            clipped_isp[44_100 * 2 + k] = v;
+        }
+        let p06 = diag_dir.join("06_clipped_burst.wav");
+        write_pcm24_stereo_wav(&p06, 44_100, &clipped_isp, &clipped_isp);
+        let t06 = analyze_file(&p06, false, &cancel).unwrap();
+        let gt06 = whole_file_16x_sinc_max(&clipped_isp);
+        assert!(gt06 > 1.40, "Expected 16x Sinc > +1.40 dBTP, got {}", gt06);
+        assert!(
+            (t06.max_tpl_joint - gt06).abs() < 0.06,
+            "Expected ebur128 close to 16x Sinc: eb={}, 16x={}",
+            t06.max_tpl_joint,
+            gt06
+        );
+
+        // 07: 1-sample -6.02 dBFS spikes every 2.5s across 12s -> TPL >= SPPM, DR=14, Min. PSR ~ 13.97
+        let mut psr_a = gen_sine(44_100, 12, 997.0, 0.1);
+        for k in 0..5 {
+            let idx = ((0.5 + (k as f64) * 2.5) * 44_100.0) as usize;
+            psr_a[idx] = 0.5;
+        }
+        let p07 = diag_dir.join("07_psr_spikes.wav");
+        write_pcm24_stereo_wav(&p07, 44_100, &psr_a, &psr_a);
+        let t07 = analyze_file(&p07, false, &cancel).unwrap();
+        assert!(t07.max_tpl_joint >= t07.max_sppm_joint - 0.01);
+        assert_eq!(t07.dr_track_rounded, 14);
+        assert!((t07.min_psr - 13.97).abs() < 0.08);
+
+        // 08: 15ms 4kHz bursts every 1.5s -> RMS=-19.07, TPL~16x Sinc, Min. PSR ~ 12.15
+        let mut psr_b = gen_sine(44_100, 12, 997.0, 0.1);
+        for k in 0..8 {
+            let start = ((0.5 + (k as f64) * 1.5) * 44_100.0) as usize;
+            for j in 0..662 {
+                psr_b[start + j] = 0.5 * (2.0 * std::f64::consts::PI * 4000.0 * (j as f64) / 44_100.0).sin();
+            }
+        }
+        let p08 = diag_dir.join("08_psr_bursts.wav");
+        write_pcm24_stereo_wav(&p08, 44_100, &psr_b, &psr_b);
+        let t08 = analyze_file(&p08, false, &cancel).unwrap();
+        let gt08 = whole_file_16x_sinc_max(&psr_b);
+        assert!((t08.rms_channels[0] - (-19.07)).abs() < 0.02);
+        assert!((t08.max_tpl_joint - gt08).abs() < 0.04);
+        assert!((t08.min_psr - 12.15).abs() < 0.10);
+
+        // 14: Exact 5.3145 / 5.6945 DR tie + 27s tail -> DR=6, TPL>=0.00-0.01, Min. PSR ~ 0.18
+        {
+            let b = 132_480usize;
+            let mut l_tie = Vec::with_capacity(10 * b);
+            let mut r_tie = Vec::with_capacity(10 * b);
+            let amp_l = 10.0_f64.powf(-5.3145 / 20.0);
+            let amp_r = 10.0_f64.powf(-5.6945 / 20.0);
+            for blk in 0..10 {
+                let scale = if blk < 2 { 1.0 } else { 0.25 };
+                for j in 0..b {
+                    let t = ((blk * b + j) as f64) / 44_100.0;
+                    let phase = (2.0 * std::f64::consts::PI * 997.0 * t).sin();
+                    let (mut sl, mut sr) = (amp_l * scale * phase, amp_r * scale * phase);
+                    if blk < 2 && j == 1000 {
+                        sl = 0.999999;
+                        sr = 0.999999;
+                    }
+                    l_tie.push(sl);
+                    r_tie.push(sr);
+                }
+            }
+            let p14 = diag_dir.join("14_dr_tie.wav");
+            write_pcm24_stereo_wav(&p14, 44_100, &l_tie, &r_tie);
+            let t14 = analyze_file(&p14, false, &cancel).unwrap();
+            assert_eq!(t14.dr_track_rounded, 6);
+            assert!(t14.max_tpl_joint >= -0.01);
+            assert!((t14.min_psr - 0.18).abs() < 0.05);
+        }
+
+        let _ = std::fs::remove_dir_all(&diag_dir);
+    }
+
+    #[test]
+    fn test_theme_config_defaults_and_presets() {
+        use crate::config::{FolderColumnsConfig, ThemeMode};
+
+        let def = AppConfig::default();
+        assert_eq!(def.theme, ThemeMode::System);
+        assert_eq!(def.folder_log_pattern, "DR.txt");
+        assert!((def.log_font_size - 13.5).abs() < 1e-6);
+
+        assert_eq!(ThemeMode::System.next(), ThemeMode::Dark);
+        assert_eq!(ThemeMode::Dark.next(), ThemeMode::Light);
+        assert_eq!(ThemeMode::Light.next(), ThemeMode::System);
+
+        // Existing configs without a `theme` field must deserialize to System default
+        let parsed: AppConfig = toml::from_str("save_logs_to_disk = true\n").unwrap();
+        assert_eq!(parsed.theme, ThemeMode::System);
+
+        let minimal = FolderColumnsConfig::minimal();
+        assert!(minimal.dr_pmf && !minimal.max_tpl_left && !minimal.lra);
+        assert_eq!(minimal.active_count(), (6, 26));
+        let mastering = FolderColumnsConfig::mastering();
+        assert!(mastering.lra && mastering.plr && mastering.min_psr && !mastering.dr_left);
+        let all = FolderColumnsConfig::all_enabled();
+        assert!(all.file_name && all.bits_used && all.plr && all.min_psr);
+        assert_eq!(all.active_count(), (26, 26));
     }
 }
 

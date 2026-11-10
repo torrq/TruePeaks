@@ -1,6 +1,6 @@
 use crate::config::{FolderColumnsConfig, SurroundFolderMode};
 use crate::dsp::TrackAnalysis;
-use crate::formatter::{format_sample_rate, pad_left_visual, visual_width};
+use crate::formatter::{folder_display_name, format_sample_rate, pad_left_visual, visual_width};
 use std::path::Path;
 
 struct ColumnDef {
@@ -391,16 +391,11 @@ pub fn format_folder_log(
         matrix.push(row);
     }
 
-    let clean_folder = std::fs::canonicalize(folder_path)
-        .map(|p| {
-            let s = p.to_string_lossy().to_string();
-            s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
-        })
-        .unwrap_or_else(|_| folder_path.to_string_lossy().to_string());
+    let album_name = folder_display_name(folder_path, "Album");
 
     let mut lines: Vec<String> = Vec::with_capacity(tracks.len() + 8);
     lines.push(String::new());
-    lines.push(format!("Folder Path:   {}", clean_folder));
+    lines.push(album_name);
     lines.push(String::new());
 
     // Header row

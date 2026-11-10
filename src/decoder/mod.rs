@@ -92,6 +92,20 @@ impl SpeakerChannel {
     pub fn is_lfe(&self) -> bool {
         matches!(self, SpeakerChannel::Lfe)
     }
+
+    /// ITU-R BS.1770-4 linear power weight (matching `ebur128`: +1.5 dB ≈ 1.41 on surround channels, 0.0 on LFE)
+    pub fn itu_bs1770_weight(&self) -> f64 {
+        match self {
+            SpeakerChannel::Lfe => 0.0,
+            SpeakerChannel::LeftSurround
+            | SpeakerChannel::RightSurround
+            | SpeakerChannel::LeftRearSurround
+            | SpeakerChannel::RightRearSurround
+            | SpeakerChannel::LeftSideSurround
+            | SpeakerChannel::RightSideSurround => 1.41,
+            _ => 1.0,
+        }
+    }
 }
 
 pub fn default_channel_layout(count: usize) -> Vec<SpeakerChannel> {

@@ -6,14 +6,13 @@ use crate::decoder::{open_audio_file, DecodeError, SpeakerChannel, CHUNK_FRAMES}
 use dr_pmf::DrPmfAccumulator;
 use loudness::LoudnessAnalyzer;
 use stats::{compute_plr, TrackStatsAccumulator};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Clone)]
 pub struct TrackAnalysis {
     pub file_stem: String,
-    pub absolute_path: PathBuf,
     pub file_format: String,
     pub sample_rate: u32,
     pub channels: Vec<SpeakerChannel>,
@@ -107,16 +106,8 @@ pub fn analyze_file(
         .map(|s| format!(".{}", s.to_ascii_lowercase()))
         .unwrap_or_default();
 
-    let abs_path = std::fs::canonicalize(path)
-        .map(|p| {
-            let s = p.to_string_lossy().to_string();
-            PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s))
-        })
-        .unwrap_or_else(|_| path.to_path_buf());
-
     Ok(TrackAnalysis {
         file_stem,
-        absolute_path: abs_path,
         file_format: ext,
         sample_rate,
         channels: final_meta.channels,

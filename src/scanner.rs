@@ -3,7 +3,7 @@ use crate::decoder::{is_supported_audio_file, DecodeError};
 use crate::dsp::{analyze_file, TrackAnalysis};
 use crate::formatter::folder_log::{compute_official_album_dr, format_folder_log};
 use crate::formatter::single_log::format_single_file_log;
-use crate::formatter::{expand_filename_pattern, normalize_nfc, write_log_file};
+use crate::formatter::{expand_filename_pattern, folder_display_name, write_log_file};
 use crossbeam_channel::Sender;
 use rayon::prelude::*;
 use std::fs;
@@ -93,11 +93,7 @@ fn run_single_file_scan(
 
             if config.save_logs_to_disk {
                 let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
-                let folder_name = parent_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(normalize_nfc)
-                    .unwrap_or_else(|| "Audio".to_string());
+                let folder_name = folder_display_name(parent_dir, "Audio");
                 let out_filename = expand_filename_pattern(
                     &config.single_log_pattern,
                     &folder_name,
@@ -180,11 +176,7 @@ fn run_folder_scan(
     }
 
     let total = audio_files.len();
-    let folder_name = dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(normalize_nfc)
-        .unwrap_or_else(|| "Album".to_string());
+    let folder_name = folder_display_name(dir, "Album");
 
     let _ = tx.send(ScanEvent::Started {
         total_files: total,
