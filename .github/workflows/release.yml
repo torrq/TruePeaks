@@ -30,7 +30,7 @@ jobs:
           - name: Linux (x86_64)
             os: ubuntu-latest
             targets: x86_64-unknown-linux-gnu
-            cache_key: linux-x86_64
+            cache_key: linux-x86_64-glibc228
             artifact_name: truepeaks-linux-x86_64
           - name: macOS (Universal arm64 + x86_64)
             os: macos-latest
@@ -42,7 +42,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Install Linux windowing/GL dev libraries
+      - name: Install Linux windowing/GL dev libraries & cargo-zigbuild
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -53,7 +53,11 @@ jobs:
             libx11-dev \
             libxcursor-dev \
             libxrandr-dev \
-            libxi-dev
+            libxi-dev \
+            python3-venv
+          python3 -m venv "$RUNNER_TEMP/zig-venv"
+          "$RUNNER_TEMP/zig-venv/bin/pip" install --quiet cargo-zigbuild
+          echo "$RUNNER_TEMP/zig-venv/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -78,13 +82,24 @@ jobs:
           Copy-Item README.md, LICENSE dist/stage/
           Compress-Archive -Path dist/stage/* -DestinationPath dist/truepeaks-windows-x86_64.zip -Force
 
-      - name: Build release binary (Linux)
+      - name: Build release binary (Linux glibc 2.28+)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo build --release --locked --target x86_64-unknown-linux-gnu
-          strip target/x86_64-unknown-linux-gnu/release/truepeaks
+          cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
+          BIN="target/x86_64-unknown-linux-gnu/release/truepeaks"
+          strip "$BIN"
+          echo "=== Shared library dependencies ==="
+          ldd "$BIN" || true
+          echo "=== Required GLIBC symbol versions ==="
+          GLIBC_VERS=$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -Vu || true)
+          echo "$GLIBC_VERS"
+          MAX_VER=$(echo "$GLIBC_VERS" | sed 's/GLIBC_//' | sort -V | tail -n1)
+          echo "Max required GLIBC version: ${MAX_VER:-none}"
+          if [ -n "$MAX_VER" ]; then
+            python3 -c "import sys; v=tuple(int(x) for x in '$MAX_VER'.split('.')); sys.exit(0 if v[:2] <= (2, 28) else 1)"
+          fi
           mkdir -p dist/stage
-          cp target/x86_64-unknown-linux-gnu/release/truepeaks dist/stage/
+          cp "$BIN" dist/stage/
           cp README.md LICENSE dist/stage/
           tar -czf dist/truepeaks-linux-x86_64.tar.gz -C dist/stage .
 
