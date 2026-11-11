@@ -5,6 +5,8 @@ use crate::config::{
 };
 use crate::decoder::is_supported_audio_file;
 use crate::formatter::expand_filename_pattern;
+use crate::math_assets::{self, MathSvgAsset};
+use crate::math_svg::{paint_math_svg, MathSvgCache};
 use crate::scanner::{spawn_scan_job, ScanEvent, ScanTarget};
 use crossbeam_channel::{unbounded, Receiver};
 use eframe::egui::{
@@ -97,40 +99,40 @@ impl Palette {
         if dark {
             Self {
                 dark: true,
-                canvas: Color32::from_rgb(17, 19, 25),
-                surface: Color32::from_rgb(26, 29, 38),
-                surface_alt: Color32::from_rgb(35, 39, 51),
-                well: Color32::from_rgb(13, 15, 20),
-                border: Color32::from_rgb(48, 53, 68),
-                accent: Color32::from_rgb(59, 130, 246),
-                accent_hover: Color32::from_rgb(96, 165, 250),
+                canvas: Color32::from_rgb(21, 21, 21),
+                surface: Color32::from_rgb(32, 32, 32),
+                surface_alt: Color32::from_rgb(43, 43, 43),
+                well: Color32::from_rgb(16, 16, 16),
+                border: Color32::from_rgb(58, 58, 58),
+                accent: Color32::from_rgb(50, 142, 255),
+                accent_hover: Color32::from_rgb(91, 175, 255),
                 text_primary: Color32::from_rgb(236, 239, 246),
-                text_muted: Color32::from_rgb(154, 163, 180),
-                pill_active_fill: Color32::from_rgb(37, 99, 235),
+                text_muted: Color32::from_rgb(167, 167, 167),
+                pill_active_fill: Color32::from_rgb(17, 107, 255),
                 pill_active_text: Color32::WHITE,
-                pill_inactive_fill: Color32::from_rgb(33, 37, 48),
+                pill_inactive_fill: Color32::from_rgb(41, 41, 41),
                 pill_inactive_text: Color32::from_rgb(190, 196, 210),
-                pill_inactive_border: Color32::from_rgb(60, 66, 84),
-                success: Color32::from_rgb(74, 222, 128),
+                pill_inactive_border: Color32::from_rgb(72, 72, 72),
+                success: Color32::from_rgb(176, 232, 115),
                 error: Color32::from_rgb(248, 113, 113),
             }
         } else {
             Self {
                 dark: false,
-                canvas: Color32::from_rgb(244, 246, 250),
-                surface: Color32::WHITE,
-                surface_alt: Color32::from_rgb(235, 239, 246),
-                well: Color32::WHITE,
-                border: Color32::from_rgb(214, 220, 232),
-                accent: Color32::from_rgb(37, 99, 235),
-                accent_hover: Color32::from_rgb(29, 78, 216),
+                canvas: Color32::from_rgb(226, 237, 251),
+                surface: Color32::from_rgb(247, 251, 255),
+                surface_alt: Color32::from_rgb(216, 232, 249),
+                well: Color32::from_rgb(247, 251, 255),
+                border: Color32::from_rgb(196, 214, 237),
+                accent: Color32::from_rgb(17, 135, 255),
+                accent_hover: Color32::from_rgb(0, 109, 245),
                 text_primary: Color32::from_rgb(22, 26, 36),
-                text_muted: Color32::from_rgb(92, 101, 118),
-                pill_active_fill: Color32::from_rgb(37, 99, 235),
+                text_muted: Color32::from_rgb(83, 105, 132),
+                pill_active_fill: Color32::from_rgb(17, 135, 255),
                 pill_active_text: Color32::WHITE,
-                pill_inactive_fill: Color32::from_rgb(238, 241, 247),
+                pill_inactive_fill: Color32::from_rgb(220, 233, 249),
                 pill_inactive_text: Color32::from_rgb(55, 65, 81),
-                pill_inactive_border: Color32::from_rgb(203, 213, 225),
+                pill_inactive_border: Color32::from_rgb(185, 209, 231),
                 success: Color32::from_rgb(21, 128, 61),
                 error: Color32::from_rgb(185, 28, 28),
             }
@@ -166,11 +168,12 @@ fn build_visuals(dark: bool) -> egui::Visuals {
     v.slider_trailing_fill = true;
     v.interact_cursor = Some(CursorIcon::PointingHand);
 
-    v.selection.bg_fill = if dark {
-        Color32::from_rgba_unmultiplied(59, 130, 246, 95)
-    } else {
-        Color32::from_rgba_unmultiplied(37, 99, 235, 55)
-    };
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(
+        pal.accent.r(),
+        pal.accent.g(),
+        pal.accent.b(),
+        if dark { 95 } else { 55 },
+    );
     v.selection.stroke = Stroke::new(1.0_f32, pal.accent);
 
     let r = Rounding::same(6.0);
@@ -187,9 +190,9 @@ fn build_visuals(dark: bool) -> egui::Visuals {
     v.widgets.inactive.rounding = r;
 
     let hover_fill = if dark {
-        Color32::from_rgb(47, 53, 68)
+        Color32::from_rgb(54, 54, 54)
     } else {
-        Color32::from_rgb(225, 231, 242)
+        Color32::from_rgb(202, 222, 246)
     };
     v.widgets.hovered.bg_fill = hover_fill;
     v.widgets.hovered.weak_bg_fill = hover_fill;
@@ -198,9 +201,9 @@ fn build_visuals(dark: bool) -> egui::Visuals {
     v.widgets.hovered.rounding = r;
 
     let active_fill = if dark {
-        Color32::from_rgb(56, 63, 82)
+        Color32::from_rgb(66, 66, 66)
     } else {
-        Color32::from_rgb(212, 221, 238)
+        Color32::from_rgb(187, 213, 244)
     };
     v.widgets.active.bg_fill = active_fill;
     v.widgets.active.weak_bg_fill = active_fill;
@@ -252,6 +255,7 @@ pub struct TruePeaksApp {
     copied_at: Option<Instant>,
     about_tab: AboutTab,
     about_url_copied_at: Option<Instant>,
+    math_svg_cache: MathSvgCache,
 
     // Window geometry persistence
     window_frames_seen: u32,
@@ -282,6 +286,7 @@ impl TruePeaksApp {
             copied_at: None,
             about_tab: AboutTab::Overview,
             about_url_copied_at: None,
+            math_svg_cache: MathSvgCache::default(),
             window_frames_seen: 0,
             window_save_pending_at: None,
         }
@@ -1316,7 +1321,7 @@ impl TruePeaksApp {
 
         let max_card_w = match self.about_tab {
             AboutTab::Overview => 620.0,
-            AboutTab::MathDetails => 780.0,
+            AboutTab::MathDetails => 860.0,
         };
 
         egui::ScrollArea::vertical()
@@ -1420,7 +1425,7 @@ impl TruePeaksApp {
                                     self.render_about_overview(ui, ctx, pal, accent_text, repo_url, version);
                                 }
                                 AboutTab::MathDetails => {
-                                    self.render_about_math_details(ui, ctx, pal, accent_text, repo_url);
+                                    self.render_about_math_details(ui, ctx, pal, accent_text);
                                 }
                             }
                         });
@@ -1566,17 +1571,6 @@ impl TruePeaksApp {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add(
-                    egui::Button::new(RichText::new("DSP & Math Details →").size(13.5))
-                        .min_size(Vec2::new(0.0, 30.0)),
-                )
-                .on_hover_text("View formulas, DSP pipeline details & Wikipedia links")
-                .clicked()
-            {
-                self.about_tab = AboutTab::MathDetails;
-            }
-
-            if ui
-                .add(
                     egui::Button::new(RichText::new("Open GitHub ↗").size(13.5))
                         .min_size(Vec2::new(0.0, 30.0)),
                 )
@@ -1616,7 +1610,6 @@ impl TruePeaksApp {
         ctx: &egui::Context,
         pal: &Palette,
         accent_text: Color32,
-        repo_url: &str,
     ) {
         ui.label(
             RichText::new(
@@ -1629,15 +1622,13 @@ impl TruePeaksApp {
 
         math_section_card(
             ui,
+            ctx,
+            &mut self.math_svg_cache,
             pal,
             accent_text,
             "1. PCM Normalization & Effective Bit Depth (Bits Used)",
-            "Integer samples normalize symmetrically into [-1, 1) by power-of-2 full-scale divisors. Lossless integers accumulate a 32-bit MSB-aligned bitwise OR mask across the track to detect padded bit depths (such as 16-bit audio stored inside a 24-bit WAV or FLAC container).",
-            &[
-                "x[n] = (s[n] - 128) / 2^7  [U8]    |    s[n] / 2^(b - 1)  [S16 / S24 / S32]",
-                "M    = OR_all( MSB32(s_c[n]) )     [U8 << 24, S16 << 16, S24 << 8, S32]",
-                "Bits Used = 0  (if M == 0)   |   32 - tzcnt(M)  (if M != 0)",
-            ],
+            "Integer samples normalize symmetrically into [-1, 1) by power-of-2 full-scale divisors. Lossless integers left-align into 32 bits and accumulate a bitwise OR mask across the track to detect zero-padded bit depths (such as 16-bit audio stored inside a 24-bit WAV or FLAC container).",
+            math_assets::SECTION_1,
             &[
                 ("PCM", "https://en.wikipedia.org/wiki/Pulse-code_modulation"),
                 ("Audio Bit Depth", "https://en.wikipedia.org/wiki/Audio_bit_depth"),
@@ -1648,16 +1639,13 @@ impl TruePeaksApp {
         ui.add_space(10.0);
         math_section_card(
             ui,
+            ctx,
+            &mut self.math_svg_cache,
             pal,
             accent_text,
             "2. Sample Peak (SPPM) & Oversampled True Peak (TPL)",
-            "SPPM records peak raw sample magnitude in dBFS. True Peak detects inter-sample overshoots per ITU-R BS.1770-4 Annex 2 via a 48-tap Hann-windowed sinc polyphase FIR interpolator adapting factor F to sample rate.",
-            &[
-                "SPPM_c = 20 * log10( max_n |x_c[n]| ) dBFS    |    SPPM_joint = max_c SPPM_c",
-                "w[j] = 0.5 * (1 - cos(2*pi*j / 48)),   h[j] = w[j] * sinc((j - 24) / F)",
-                "F = 4x (fs < 96 kHz, 12 taps/phase)  |  2x (96-192 kHz, 24 taps/phase)  |  1x (>= 192 kHz)",
-                "TPL_c = 20 * log10( max_k |x_tilde_c[k]| ) dBTP    |    TPL_joint = max_c TPL_c",
-            ],
+            "SPPM records exact peak decoded sample magnitude in dBFS. True Peak detects inter-sample overshoots per ITU-R BS.1770-4 Annex 2 via a 48-tap Hann-windowed sinc polyphase FIR interpolator adapting oversampling factor F to sample rate (4x < 96 kHz, 2x < 192 kHz, 1x >= 192 kHz).",
+            math_assets::SECTION_2,
             &[
                 ("dBFS", "https://en.wikipedia.org/wiki/DBFS"),
                 ("Whittaker-Shannon", "https://en.wikipedia.org/wiki/Whittaker%E2%80%93Shannon_interpolation_formula"),
@@ -1670,16 +1658,13 @@ impl TruePeaksApp {
         ui.add_space(10.0);
         math_section_card(
             ui,
+            ctx,
+            &mut self.math_svg_cache,
             pal,
             accent_text,
-            "3. ITU-R BS.1770-4 K-Weighting & Channel Weights",
-            "A two-stage bilinear-transformed IIR biquad cascade models acoustic head high-frequency shelving and low-frequency rolloff before applying BS.1770 channel weights (omitting LFE).",
-            &[
-                "Stage 1 Shelf: f0 = 1681.974 Hz, G = +3.99984 dB, Q = 0.70718, K1 = tan(pi*f0/fs)",
-                "Stage 2 High-Pass (RLB): f0 = 38.1355 Hz, Q = 0.50033, b2 = [1, -2, 1]",
-                "Channel weights G_c: 1.0 (L, R, C)  |  1.41 (+1.5 dB Surrounds)  |  0.0 (LFE)",
-                "Loudness L(z) = -0.691 + 10 * log10(z) LUFS",
-            ],
+            "3. ITU-R BS.1770-4 K-Weighting Filter & Channel Weights",
+            "Two bilinear-transformed biquad stages model acoustic head shelving (1681.97 Hz, +4.00 dB) and high-pass rolloff (38.14 Hz) in Direct Form II Transposed. Channel weights are G_c = 1.0 (L, R, C), 1.41 (+1.5 dB Surrounds), and 0.0 (LFE omitted).",
+            math_assets::SECTION_3,
             &[
                 ("LUFS / BS.1770", "https://en.wikipedia.org/wiki/LUFS"),
                 ("Biquad Filter", "https://en.wikipedia.org/wiki/Digital_biquad_filter"),
@@ -1691,16 +1676,13 @@ impl TruePeaksApp {
         ui.add_space(10.0);
         math_section_card(
             ui,
+            ctx,
+            &mut self.math_svg_cache,
             pal,
             accent_text,
-            "4. Continuous Sliding Momentary / Short-Term, LUFSi & LRA",
-            "Unlike coarse 100 ms hops, Momentary (400 ms) and Short-Term (3.0 s) maxima slide sample-by-sample using a 3.0 s circular buffer with periodic drift resync. Per-channel maxima apply the +3.01 dB (2x) dual-mono convention when C > 1.",
-            &[
-                "W_M = 4 * round(fs / 10) [400 ms]     |     W_S = 30 * round(fs / 10) [3.0 s]",
-                "L_M,joint[n] = -0.691 + 10 * log10( (1/W_M) * sum_c G_c * S_{M,c}[n] )",
-                "LUFSi (400 ms, 75% overlap): Gate 1 > -70.0 LUFS, Gate 2 > (L_abs - 10.0 LU)",
-                "LRA (EBU Tech 3342): P95(L_S) - P10(L_S) above -70 LUFS & (L_abs - 20.0 LU)",
-            ],
+            "4. Continuous Sliding Loudness, Integrated LUFS & LRA",
+            "Momentary (400 ms) and Short-Term (3.0 s) windows slide sample-by-sample using a circular buffer with periodic drift resync (applying +3.01 dB dual-mono scaling to single channels when C > 1). Integrated LUFS applies -70 LUFS / -10 LU dual gating over 75%-overlapping blocks, and LRA computes P95 - P10.",
+            math_assets::SECTION_4,
             &[
                 ("EBU R 128", "https://en.wikipedia.org/wiki/EBU_R_128"),
                 ("Circular Buffer", "https://en.wikipedia.org/wiki/Circular_buffer"),
@@ -1711,15 +1693,13 @@ impl TruePeaksApp {
         ui.add_space(10.0);
         math_section_card(
             ui,
+            ctx,
+            &mut self.math_svg_cache,
             pal,
             accent_text,
             "5. Continuous Min. PSR & Track PLR",
-            "PSR evaluates peak sample amplitude against active Short-Term loudness at every sample frame via an O(1) monotonic decreasing deque, while PLR measures whole-track headroom relative to LUFSi (capping true peaks above 0 dBTP at 0.0).",
-            &[
-                "P_3s[n] = max_{c, 0 <= i < W_S} |x_c[n - i]|     (trailing 3.0 s monotonic deque)",
-                "Min. PSR = 0.691 + 10 * log10( W_S * min_{L_S > -70 LUFS}( P_3s[n]^2 / sum G_c*S_{S,c}[n] ) ) LU",
-                "P_ref = 0.0 (if TPL_joint > 0.0) else max(TPL_joint, SPPM_joint)   ->   PLR = P_ref - LUFSi LU",
-            ],
+            "PSR compares sliding 3.0 s peak sample amplitude (via an O(1) monotonic deque) against active Short-Term loudness above -70 LUFS without per-frame log10 calls. PLR compares macro peak headroom against LUFSi, capping reference true peaks above 0.0 dBTP at 0.0.",
+            math_assets::SECTION_5,
             &[
                 ("Crest Factor", "https://en.wikipedia.org/wiki/Crest_factor"),
                 ("Double-Ended Queue", "https://en.wikipedia.org/wiki/Double-ended_queue"),
@@ -1729,19 +1709,16 @@ impl TruePeaksApp {
         ui.add_space(10.0);
         math_section_card(
             ui,
+            ctx,
+            &mut self.math_svg_cache,
             pal,
             accent_text,
-            "6. AES17 RMS, PMF Dynamic Range (DR) & Album Rating",
-            "AES17 RMS scales energy by 2.0 so a full-scale sine reads 0.00 dBFS. PMF splits audio into quantized blocks (~3 s), pairs top-20% RMS against the second-loudest block peak per channel, and averages unrounded values across tracks.",
-            &[
-                "RMS_AES17,c = 10 * log10( (2 / N) * sum x_c[n]^2 ) dBFS   (0 dBFS sine = 0.00 dBFS)",
-                "N_blk = 3 * (fs + 60*(fs/44100)) if 44100 | fs  (132,480 @ 44.1k)  else 3 * fs  (144,000 @ 48k)",
-                "R_20,c = sqrt( mean of top M = max(1, floor(0.20*K)) block AES17 energies )",
-                "P_2,c  = 2nd-highest block peak (or 1st if K = 1);    DR_c = 20 * log10( P_2,c / R_20,c )",
-                "DR_track = round( mean_{c in active} DR_c )   |   Album DR = round( mean_tracks DR_raw )",
-            ],
+            "6. AES17 Sinusoid-Normalized RMS & PMF Dynamic Range (DR)",
+            "AES17 RMS scales energy by 2.0 so a full-scale sine wave reads 0.00 dBFS (multi-channel Classic summaries arithmetic-average linear power across non-LFE channels). PMF partitions each channel into quantized ~3 s blocks, pairs top-20% RMS against the 2nd-loudest block peak, and rounds unrounded means.",
+            math_assets::SECTION_6,
             &[
                 ("Root Mean Square", "https://en.wikipedia.org/wiki/Root_mean_square"),
+                ("Arithmetic Mean", "https://en.wikipedia.org/wiki/Arithmetic_mean"),
                 ("Dynamic Range", "https://en.wikipedia.org/wiki/Dynamic_range"),
                 ("Loudness War", "https://en.wikipedia.org/wiki/Loudness_war"),
             ],
@@ -1750,15 +1727,14 @@ impl TruePeaksApp {
         ui.add_space(10.0);
         math_section_card(
             ui,
+            ctx,
+            &mut self.math_svg_cache,
             pal,
             accent_text,
-            "7. Combined Multi-Channel RMS & Classic Footer Bitrate",
-            "Classic foo_dr logs power-average active non-LFE channel RMS values and estimate album bitrate from total on-disk file sizes and cumulative audio duration.",
-            &[
-                "RMS_combined = 10 * log10( (1 / |A|) * sum_{c in A} 10^(RMS_AES17,c / 10) ) dB",
-                "Bitrate (kbps) = round( 8 * sum(file_bytes) / (1000 * sum(total_frames / fs)) )",
-            ],
-            &[("Arithmetic Mean", "https://en.wikipedia.org/wiki/Arithmetic_mean")],
+            "7. Album Average Bitrate (Classic DR Footer)",
+            "When generating Classic DR (foo_dr Style) metadata summaries, aggregate album bitrate in kbps is computed from total on-disk file sizes across all T analyzed tracks divided by total decoded audio duration.",
+            math_assets::SECTION_7,
+            &[],
         );
 
         ui.add_space(16.0);
@@ -1771,18 +1747,6 @@ impl TruePeaksApp {
                 .clicked()
             {
                 self.about_tab = AboutTab::Overview;
-            }
-
-            let readme_url = format!("{}/blob/main/README.md", repo_url);
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("Full README on GitHub ↗").size(13.5))
-                        .min_size(Vec2::new(0.0, 30.0)),
-                )
-                .on_hover_text(&readme_url)
-                .clicked()
-            {
-                ctx.open_url(egui::OpenUrl::new_tab(readme_url));
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -3053,13 +3017,16 @@ fn about_kv_row(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn math_section_card(
     ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
     pal: &Palette,
     accent_text: Color32,
     title: &str,
     summary: &str,
-    formulas: &[&str],
+    equations: &[MathSvgAsset],
     wiki_links: &[(&str, &str)],
 ) {
     Frame::none()
@@ -3083,23 +3050,18 @@ fn math_section_card(
                 .fill(pal.well)
                 .rounding(Rounding::same(6.0))
                 .stroke(Stroke::new(1.0_f32, pal.border))
-                .inner_margin(Margin::symmetric(10.0, 8.0))
+                .inner_margin(Margin::symmetric(14.0, 10.0))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     egui::ScrollArea::horizontal()
                         .id_salt(title)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            for line in formulas {
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(*line)
-                                            .size(12.0)
-                                            .monospace()
-                                            .color(pal.text_primary),
-                                    )
-                                    .extend(),
-                                );
+                            for (idx, eq) in equations.iter().enumerate() {
+                                if idx > 0 {
+                                    ui.add_space(9.0);
+                                }
+                                paint_math_svg(ui, ctx, cache, eq, pal.text_primary);
                             }
                         });
                 });

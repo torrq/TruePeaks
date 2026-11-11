@@ -30,13 +30,40 @@ pub fn format_folder_log(
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
 ) -> String {
+    format_folder_log_with_header(
+        folder_path,
+        tracks,
+        style,
+        cols_cfg,
+        name_opts,
+        surround_mode,
+        true,
+    )
+}
+
+fn format_folder_log_with_header(
+    folder_path: &Path,
+    tracks: &[TrackAnalysis],
+    style: FolderLogStyle,
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    include_header: bool,
+) -> String {
     match style {
-        FolderLogStyle::TruePeaksTable => {
-            format_truepeaks_table(folder_path, tracks, cols_cfg, name_opts, surround_mode)
+        FolderLogStyle::TruePeaksTable => format_truepeaks_table(
+            folder_path,
+            tracks,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            include_header,
+        ),
+        FolderLogStyle::ClassicFooDr => {
+            format_classic_foo_dr(folder_path, tracks, name_opts, include_header)
         }
-        FolderLogStyle::ClassicFooDr => format_classic_foo_dr(folder_path, tracks, name_opts),
         FolderLogStyle::CompactMastering => {
-            format_compact_mastering(folder_path, tracks, name_opts)
+            format_compact_mastering(folder_path, tracks, name_opts, include_header)
         }
     }
 }
@@ -147,15 +174,18 @@ fn format_classic_foo_dr(
     folder_path: &Path,
     tracks: &[TrackAnalysis],
     name_opts: &LogFilenameOptions,
+    include_header: bool,
 ) -> String {
     let album_name = folder_display_name(folder_path, "Album");
     let rule_dash = "-".repeat(80);
     let rule_eq = "=".repeat(80);
 
     let mut lines: Vec<String> = Vec::with_capacity(tracks.len() + 18);
-    lines.push(rule_dash.clone());
-    lines.push(format!("Analyzed: {}", album_name));
-    lines.push(rule_dash.clone());
+    if include_header {
+        lines.push(rule_dash.clone());
+        lines.push(format!("Analyzed: {}", album_name));
+        lines.push(rule_dash.clone());
+    }
     lines.push(String::new());
     lines.push("DR         Peak         RMS     Duration Track".to_string());
     lines.push(rule_dash.clone());
@@ -200,6 +230,7 @@ fn format_compact_mastering(
     folder_path: &Path,
     tracks: &[TrackAnalysis],
     name_opts: &LogFilenameOptions,
+    include_header: bool,
 ) -> String {
     let album_name = folder_display_name(folder_path, "Album");
     let official_dr = compute_official_album_dr(tracks);
@@ -238,8 +269,12 @@ fn format_compact_mastering(
     };
 
     let mut lines: Vec<String> = Vec::with_capacity(tracks.len() + 10);
-    lines.push(rule_eq);
-    lines.push(format!("Album:   {}", album_name));
+    if include_header {
+        lines.push(rule_eq);
+        lines.push(format!("Album:   {}", album_name));
+    } else {
+        lines.push(String::new());
+    }
     lines.push(format!(
         "Summary: DR{} (Official) | {} {} | {} | {}",
         official_dr,
@@ -284,6 +319,7 @@ fn format_truepeaks_table(
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    include_header: bool,
 ) -> String {
     let max_channels = tracks
         .iter()
@@ -655,12 +691,12 @@ fn format_truepeaks_table(
         matrix.push(row);
     }
 
-    let album_name = folder_display_name(folder_path, "Album");
-
     let mut lines: Vec<String> = Vec::with_capacity(tracks.len() + 8);
     lines.push(String::new());
-    lines.push(album_name);
-    lines.push(String::new());
+    if include_header {
+        lines.push(folder_display_name(folder_path, "Album"));
+        lines.push(String::new());
+    }
 
     // Header row
     let mut hdr_line = String::new();
@@ -681,10 +717,11 @@ fn format_truepeaks_table(
         lines.push(row_line);
     }
 
-    lines.push(String::new());
-    lines.push(format!("Number of EP/Album Files: {}", tracks.len()));
-    let official_dr = compute_official_album_dr(tracks);
-    lines.push(format!("Official EP/Album DR: {}", official_dr));
+    if include_header {
+        lines.push(String::new());
+        lines.push(format!("Number of Files: {}", tracks.len()));
+        lines.push(format!("Album DR: {}", compute_official_album_dr(tracks)));
+    }
 
     lines.join("\n")
 }
@@ -760,6 +797,46 @@ fn collect_non_empty_sections<'a>(
     }
 }
 
+fn append_directory_banner(out: &mut Vec<String>, label: &str, tracks: &[TrackAnalysis]) {
+    let rule_dash = "-".repeat(80);
+    let n = tracks.len();
+    let local_dr = compute_official_album_dr(tracks);
+    out.push(rule_dash.clone());
+    out.push(format!(
+        "Directory: {}  (DR{} | {} {})",
+        label,
+        local_dr,
+        n,
+        track_word(n)
+    ));
+    out.push(rule_dash);
+}
+
+fn append_sections(
+    out: &mut Vec<String>,
+    sections: &[(String, &FolderTreeNode)],
+    style: FolderLogStyle,
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+) {
+    for (rel_path, node) in sections {
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        append_directory_banner(out, rel_path, &node.tracks);
+        out.push(format_folder_log_with_header(
+            &node.path,
+            &node.tracks,
+            style,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            false,
+        ));
+    }
+}
+
 fn append_folder_sections(
     out: &mut Vec<String>,
     root: &FolderTreeNode,
@@ -768,34 +845,9 @@ fn append_folder_sections(
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
 ) {
-    let rule_dash = "-".repeat(80);
     let mut sections = Vec::new();
     collect_non_empty_sections(root, &root.display_name, &mut sections);
-
-    for (rel_path, node) in sections {
-        let n = node.tracks.len();
-        let local_dr = compute_official_album_dr(&node.tracks);
-        if !out.is_empty() {
-            out.push(String::new());
-        }
-        out.push(rule_dash.clone());
-        out.push(format!(
-            "Directory: {}  (DR{} | {} {})",
-            rel_path,
-            local_dr,
-            n,
-            track_word(n)
-        ));
-        out.push(rule_dash.clone());
-        out.push(format_folder_log(
-            &node.path,
-            &node.tracks,
-            style,
-            cols_cfg,
-            name_opts,
-            surround_mode,
-        ));
-    }
+    append_sections(out, &sections, style, cols_cfg, name_opts, surround_mode);
 }
 
 pub fn format_recursive_folder_log(
@@ -805,27 +857,43 @@ pub fn format_recursive_folder_log(
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
 ) -> String {
+    let mut sections = Vec::new();
+    collect_non_empty_sections(root, &root.display_name, &mut sections);
+    if sections.len() == 1 {
+        let (_, only_node) = sections[0];
+        return format_folder_log(
+            &only_node.path,
+            &only_node.tracks,
+            style,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+        );
+    }
+
     let rule_eq = "=".repeat(80);
     let total_tracks = root.total_track_count();
-    let folder_cnt = root.non_empty_folder_count();
+    let folder_cnt = sections.len();
     let overall_dr = root.official_dr();
 
     let mut out = Vec::new();
-    append_folder_sections(&mut out, root, style, cols_cfg, name_opts, surround_mode);
+    append_sections(&mut out, &sections, style, cols_cfg, name_opts, surround_mode);
 
-    if !out.is_empty() {
-        out.push(String::new());
+    if folder_cnt > 1 {
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.push(rule_eq.clone());
+        out.push(format!(
+            "Scan Summary: {} {} | {} {} | Official Overall DR: {}",
+            folder_cnt,
+            folder_word(folder_cnt),
+            total_tracks,
+            track_word(total_tracks),
+            overall_dr
+        ));
+        out.push(rule_eq);
     }
-    out.push(rule_eq.clone());
-    out.push(format!(
-        "Scan Summary: {} {} | {} {} | Official Overall DR: {}",
-        folder_cnt,
-        folder_word(folder_cnt),
-        total_tracks,
-        track_word(total_tracks),
-        overall_dr
-    ));
-    out.push(rule_eq);
 
     out.join("\n")
 }
@@ -883,17 +951,19 @@ pub fn format_combined_multi_log(
         }
     }
 
-    out.push(String::new());
-    out.push(rule_eq.clone());
-    out.push(format!(
-        "Combined Summary: {} {} | {} {} | Official Overall DR: {}",
-        folder_cnt,
-        folder_word(folder_cnt),
-        total_tracks,
-        track_word(total_tracks),
-        overall_dr
-    ));
-    out.push(rule_eq);
+    if folder_cnt > 1 || !loose_tracks.is_empty() {
+        out.push(String::new());
+        out.push(rule_eq.clone());
+        out.push(format!(
+            "Combined Summary: {} {} | {} {} | Official Overall DR: {}",
+            folder_cnt,
+            folder_word(folder_cnt),
+            total_tracks,
+            track_word(total_tracks),
+            overall_dr
+        ));
+        out.push(rule_eq);
+    }
 
     out.join("\n")
 }

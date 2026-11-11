@@ -5,6 +5,8 @@ pub mod config;
 pub mod decoder;
 pub mod dsp;
 pub mod formatter;
+pub mod math_assets;
+pub mod math_svg;
 pub mod scanner;
 
 use app::TruePeaksApp;
@@ -264,7 +266,8 @@ mod tests {
             ),
             "DR.txt"
         );
-        assert_eq!(flines.last().copied(), Some("Official EP/Album DR: 10"));
+        assert_eq!(flines[flines.len() - 2], "Number of Files: 3");
+        assert_eq!(flines.last().copied(), Some("Album DR: 10"));
 
         let header_line = flines[3];
         let expected_pipes: Vec<usize> = header_line
@@ -553,6 +556,7 @@ mod tests {
             folder_log.lines().nth(1),
             temp_dir.file_name().and_then(|s| s.to_str())
         );
+        assert!(folder_log.contains("Number of Files: 1") && folder_log.contains("Album DR: "));
         assert_eq!(
             crate::formatter::expand_filename_pattern("  ", "Album", None, None, Some(10)),
             "DR.txt"
@@ -932,6 +936,11 @@ mod tests {
         assert!(rec_log.contains("Directory: truepeaks_styles_tree_tests/Disc 1  (DR8 | 1 track)"));
         assert!(rec_log.contains("Directory: truepeaks_styles_tree_tests/Disc 1/Bonus  (DR12 | 1 track)"));
         assert!(rec_log.contains("Scan Summary: 3 folders | 3 tracks | Official Overall DR: 10"));
+        assert!(!rec_log.lines().any(|l| l.trim() == "truepeaks_styles_tree_tests"));
+        assert!(!rec_log.lines().any(|l| l.trim() == "Disc 1"));
+        assert!(!rec_log.lines().any(|l| l.trim() == "Bonus"));
+        assert!(!rec_log.contains("Number of Files:"));
+        assert!(!rec_log.contains("Album DR:"));
 
         // 5. Multi-folder drop: separate log per directory by default
         let multi_root = temp_root.join("MultiDrop");
@@ -981,7 +990,54 @@ mod tests {
         assert!(!comb_log.contains("\\-- "));
         assert!(comb_log.contains("Directory: Album A  (DR8 | 1 track)"));
         assert!(comb_log.contains("Directory: Album B  (DR12 | 1 track)"));
+        assert!(!comb_log.lines().any(|l| l.trim() == "Album A"));
+        assert!(!comb_log.lines().any(|l| l.trim() == "Album B"));
+        assert!(!comb_log.contains("Number of Files:"));
+        assert!(!comb_log.contains("Album DR:"));
         assert!(comb_log.contains("Combined Summary: 2 folders | 2 tracks | Official Overall DR: 10"));
+
+        let mut single_rec_cfg = AppConfig::default();
+        single_rec_cfg.recurse_subfolders = true;
+        single_rec_cfg.save_logs_to_disk = false;
+        let (single_rec_log, _, single_rec_tracks, single_rec_folders) =
+            run_scan_sync(ScanTarget::Folder(dir_a.clone()), single_rec_cfg);
+        assert_eq!(single_rec_tracks, 1);
+        assert_eq!(single_rec_folders, 1);
+        assert!(!single_rec_log.contains("Directory: Album A"));
+        assert!(single_rec_log.lines().any(|l| l.trim() == "Album A"));
+        assert!(single_rec_log.contains("Number of Files: 1"));
+        assert!(single_rec_log.contains("Album DR: 8"));
+        assert!(!single_rec_log.contains("Scan Summary:"));
+
+        let mut comb_classic_cfg = AppConfig::default();
+        comb_classic_cfg.combine_dropped_folders = true;
+        comb_classic_cfg.save_logs_to_disk = false;
+        comb_classic_cfg.folder_log_style = FolderLogStyle::ClassicFooDr;
+        let (comb_classic_log, _, _, _) = run_scan_sync(
+            ScanTarget::Multi {
+                dirs: vec![dir_a.clone(), dir_b.clone()],
+                files: Vec::new(),
+            },
+            comb_classic_cfg,
+        );
+        assert!(comb_classic_log.contains("Directory: Album A  (DR8 | 1 track)"));
+        assert!(!comb_classic_log.contains("Analyzed: Album A"));
+        assert!(!comb_classic_log.contains("Analyzed: Album B"));
+
+        let mut comb_compact_cfg = AppConfig::default();
+        comb_compact_cfg.combine_dropped_folders = true;
+        comb_compact_cfg.save_logs_to_disk = false;
+        comb_compact_cfg.folder_log_style = FolderLogStyle::CompactMastering;
+        let (comb_compact_log, _, _, _) = run_scan_sync(
+            ScanTarget::Multi {
+                dirs: vec![dir_a.clone(), dir_b.clone()],
+                files: Vec::new(),
+            },
+            comb_compact_cfg,
+        );
+        assert!(comb_compact_log.contains("Directory: Album A  (DR8 | 1 track)"));
+        assert!(!comb_compact_log.contains("Album:   Album A"));
+        assert!(!comb_compact_log.contains("Album:   Album B"));
 
         // 7. Existing log preservation (default: number _2, _3) vs overwrite option
         assert_eq!(
@@ -1008,7 +1064,11 @@ mod tests {
         assert!(!dir_a.join("DR_4.txt").exists());
         let dr_contents = std::fs::read_to_string(dir_a.join("DR.txt")).unwrap();
         assert_ne!(dr_contents, "ORIGINAL LOG");
-        assert!(dr_contents.contains("Album A") && ov_log.contains("Official EP/Album DR:"));
+        assert!(
+            dr_contents.contains("Album A")
+                && ov_log.contains("Number of Files: 1")
+                && ov_log.contains("Album DR: 8")
+        );
 
         // 8. Logged track filename restriction (chars limit) and non-ASCII stripping inside logs only
         use crate::config::LogFilenameOptions;
@@ -1057,6 +1117,38 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_baked_math_svg_assets_rasterize_cleanly() {
+        use crate::math_assets::{
+            SECTION_1, SECTION_2, SECTION_3, SECTION_4, SECTION_5, SECTION_6, SECTION_7,
+        };
+        use crate::math_svg::rasterize_svg_rgba;
+
+        let all_sections = [
+            SECTION_1, SECTION_2, SECTION_3, SECTION_4, SECTION_5, SECTION_6, SECTION_7,
+        ];
+        let mut total = 0usize;
+        for section in all_sections {
+            assert!(!section.is_empty());
+            for asset in section {
+                assert!(asset.width_pt > 10.0 && asset.height_pt > 5.0);
+                let (w, h, rgba) =
+                    rasterize_svg_rgba(asset, 2.0).expect("embedded math svgz must rasterize");
+                assert!(w > 10 && h > 5);
+                assert_eq!(rgba.len(), (w as usize) * (h as usize) * 4);
+                let non_empty_pixels = rgba.chunks_exact(4).filter(|px| px[3] > 20).count();
+                assert!(
+                    non_empty_pixels > 40,
+                    "expected visible rendered ink in {}, found {} pixels",
+                    asset.id,
+                    non_empty_pixels
+                );
+                total += 1;
+            }
+        }
+        assert_eq!(total, 33);
     }
 }
 
