@@ -1,14 +1,21 @@
-use crate::config::SingleFileRowsConfig;
+use crate::config::{LogFilenameOptions, SingleFileRowsConfig};
 use crate::decoder::layout_description;
 use crate::dsp::TrackAnalysis;
-use crate::formatter::format_sample_rate;
+use crate::formatter::{format_log_track_name, format_sample_rate};
 
-pub fn format_single_file_log(track: &TrackAnalysis, rows_cfg: &SingleFileRowsConfig) -> String {
+pub fn format_single_file_log(
+    track: &TrackAnalysis,
+    rows_cfg: &SingleFileRowsConfig,
+    name_opts: &LogFilenameOptions,
+) -> String {
     let mut lines: Vec<String> = Vec::with_capacity(20);
 
     // Leading empty line
     lines.push(String::new());
-    lines.push(format!("File Name:     {}", track.file_stem));
+    lines.push(format!(
+        "File Name:     {}",
+        format_log_track_name(&track.file_stem, name_opts)
+    ));
     lines.push(format!("File Format:   {}", track.file_format));
 
     let num_ch = track.channels.len().max(1);

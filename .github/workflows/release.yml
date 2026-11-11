@@ -116,7 +116,8 @@ jobs:
             target/x86_64-apple-darwin/release/truepeaks \
             -output dist/stage/TruePeaks.app/Contents/MacOS/truepeaks
           chmod +x dist/stage/TruePeaks.app/Contents/MacOS/truepeaks
-          cat << 'EOF' > dist/stage/TruePeaks.app/Contents/Info.plist
+          APP_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          cat << EOF > dist/stage/TruePeaks.app/Contents/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -132,9 +133,9 @@ jobs:
             <key>CFBundlePackageType</key>
             <string>APPL</string>
             <key>CFBundleVersion</key>
-            <string>0.1.0</string>
+            <string>${APP_VERSION}</string>
             <key>CFBundleShortVersionString</key>
-            <string>0.1.0</string>
+            <string>${APP_VERSION}</string>
             <key>LSMinimumSystemVersion</key>
             <string>11.0</string>
             <key>NSHighResolutionCapable</key>

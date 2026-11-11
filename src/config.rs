@@ -81,6 +81,51 @@ impl SurroundFolderMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FolderLogStyle {
+    TruePeaksTable,
+    ClassicFooDr,
+    CompactMastering,
+}
+
+impl Default for FolderLogStyle {
+    fn default() -> Self {
+        Self::TruePeaksTable
+    }
+}
+
+impl FolderLogStyle {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FolderLogStyle::TruePeaksTable => "TruePeaks Table (Default)",
+            FolderLogStyle::ClassicFooDr => "Classic DR (foo_dr Style)",
+            FolderLogStyle::CompactMastering => "Compact Mastering",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            FolderLogStyle::TruePeaksTable => {
+                "Customizable pipe-delimited multi-column spreadsheet table."
+            }
+            FolderLogStyle::ClassicFooDr => {
+                "Classic DR / Peak / RMS / Duration layout with album codec summary (omits app/date header)."
+            }
+            FolderLogStyle::CompactMastering => {
+                "Concise album summary header with tight left-aligned DR, Peak, TPL, LUFSi, PSR, Time & Track."
+            }
+        }
+    }
+
+    pub fn all() -> &'static [FolderLogStyle] {
+        &[
+            FolderLogStyle::TruePeaksTable,
+            FolderLogStyle::ClassicFooDr,
+            FolderLogStyle::CompactMastering,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
     System,
     Dark,
@@ -322,21 +367,54 @@ impl Default for SingleFileRowsConfig {
     }
 }
 
+pub const DEFAULT_WINDOW_WIDTH: f32 = 980.0;
+pub const DEFAULT_WINDOW_HEIGHT: f32 = 660.0;
+pub const MIN_WINDOW_WIDTH: f32 = 640.0;
+pub const MIN_WINDOW_HEIGHT: f32 = 420.0;
+pub const DEFAULT_LOG_FILENAME_MAX_LEN: usize = 64;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LogFilenameOptions {
+    pub limit_length: bool,
+    pub max_length: usize,
+    pub strip_non_ascii: bool,
+}
+
+impl Default for LogFilenameOptions {
+    fn default() -> Self {
+        Self {
+            limit_length: false,
+            max_length: DEFAULT_LOG_FILENAME_MAX_LEN,
+            strip_non_ascii: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub folder_log_style: FolderLogStyle,
     pub folder_columns: FolderColumnsConfig,
     pub single_rows: SingleFileRowsConfig,
+    pub log_filenames: LogFilenameOptions,
     pub surround_folder_mode: SurroundFolderMode,
     pub include_lfe_in_dr: bool,
+    pub recurse_subfolders: bool,
+    pub combine_dropped_folders: bool,
     pub max_threads: usize,
     pub theme: ThemeMode,
     pub log_font_size: f32,
+    pub window_x: Option<f32>,
+    pub window_y: Option<f32>,
+    pub window_width: f32,
+    pub window_height: f32,
     pub charset: CharsetMode,
     pub line_ending: LineEndingMode,
     pub folder_log_pattern: String,
     pub single_log_pattern: String,
     pub save_logs_to_disk: bool,
+    pub overwrite_existing_logs: bool,
 }
 
 impl Default for AppConfig {
@@ -345,18 +423,27 @@ impl Default for AppConfig {
             .map(|n| n.get())
             .unwrap_or(4);
         Self {
+            folder_log_style: FolderLogStyle::TruePeaksTable,
             folder_columns: FolderColumnsConfig::default(),
             single_rows: SingleFileRowsConfig::default(),
+            log_filenames: LogFilenameOptions::default(),
             surround_folder_mode: SurroundFolderMode::ExpandPerChannel,
             include_lfe_in_dr: false,
+            recurse_subfolders: false,
+            combine_dropped_folders: false,
             max_threads: max_cores,
             theme: ThemeMode::System,
             log_font_size: 13.5,
+            window_x: None,
+            window_y: None,
+            window_width: DEFAULT_WINDOW_WIDTH,
+            window_height: DEFAULT_WINDOW_HEIGHT,
             charset: CharsetMode::Utf8,
             line_ending: LineEndingMode::Crlf,
             folder_log_pattern: "DR.txt".to_string(),
             single_log_pattern: "{file_name}_log.txt".to_string(),
             save_logs_to_disk: true,
+            overwrite_existing_logs: false,
         }
     }
 }
@@ -367,6 +454,37 @@ impl AppConfig {
             .map(|dirs| dirs.config_dir().join("config.toml"))
     }
 
+    pub fn has_saved_window_position(&self) -> bool {
+        self.window_x.is_some() && self.window_y.is_some()
+    }
+
+    pub fn sanitize_window_geometry(&mut self) {
+        self.window_width = if self.window_width.is_finite() {
+            self.window_width.clamp(MIN_WINDOW_WIDTH, 16_384.0)
+        } else {
+            DEFAULT_WINDOW_WIDTH
+        };
+        self.window_height = if self.window_height.is_finite() {
+            self.window_height.clamp(MIN_WINDOW_HEIGHT, 16_384.0)
+        } else {
+            DEFAULT_WINDOW_HEIGHT
+        };
+
+        let valid_pos = match (self.window_x, self.window_y) {
+            (Some(x), Some(y)) => {
+                x.is_finite()
+                    && y.is_finite()
+                    && (-8192.0..=16_384.0).contains(&x)
+                    && (-8192.0..=16_384.0).contains(&y)
+            }
+            _ => false,
+        };
+        if !valid_pos {
+            self.window_x = None;
+            self.window_y = None;
+        }
+    }
+
     pub fn load() -> Self {
         if let Some(path) = Self::config_path() {
             if let Ok(contents) = fs::read_to_string(&path) {
@@ -375,11 +493,13 @@ impl AppConfig {
                         .map(|n| n.get())
                         .unwrap_or(4);
                     cfg.max_threads = cfg.max_threads.clamp(1, max_cores);
+                    cfg.log_filenames.max_length = cfg.log_filenames.max_length.clamp(8, 255);
                     if !cfg.log_font_size.is_finite() {
                         cfg.log_font_size = 13.5;
                     } else {
                         cfg.log_font_size = cfg.log_font_size.clamp(10.0, 22.0);
                     }
+                    cfg.sanitize_window_geometry();
                     return cfg;
                 }
             }

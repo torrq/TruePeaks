@@ -1,9 +1,10 @@
 [package]
 name = "truepeaks"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "High-performance pure-Rust audio loudness and PMF dynamic range analyzer"
 license = "MIT"
+repository = "https://github.com/torrq/TruePeaks"
 
 [dependencies]
 eframe = "0.29"

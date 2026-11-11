@@ -10,19 +10,33 @@ pub mod scanner;
 use app::TruePeaksApp;
 
 fn main() -> eframe::Result<()> {
+    let mut initial_cfg = config::AppConfig::load();
+    initial_cfg.sanitize_window_geometry();
+    let has_saved_pos = initial_cfg.has_saved_window_position();
+
+    let window_title = format!(
+        "TruePeaks — Audio Loudness & Dynamic Range Analyzer v{}",
+        env!("CARGO_PKG_VERSION")
+    );
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title(window_title)
+        .with_inner_size([initial_cfg.window_width, initial_cfg.window_height])
+        .with_min_inner_size([config::MIN_WINDOW_WIDTH, config::MIN_WINDOW_HEIGHT])
+        .with_drag_and_drop(true);
+    if let (Some(x), Some(y)) = (initial_cfg.window_x, initial_cfg.window_y) {
+        viewport = viewport.with_position([x, y]);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("TruePeaks — Audio Loudness & Dynamic Range Analyzer")
-            .with_inner_size([980.0, 660.0])
-            .with_min_inner_size([640.0, 420.0])
-            .with_drag_and_drop(true),
+        viewport,
+        centered: !has_saved_pos,
         ..Default::default()
     };
 
     eframe::run_native(
         "TruePeaks",
         native_options,
-        Box::new(|cc| Ok(Box::new(TruePeaksApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(TruePeaksApp::new(cc, initial_cfg)))),
     )
 }
 
@@ -61,6 +75,24 @@ mod tests {
                 f.write_all(&le[0..3]).unwrap();
             }
         }
+    }
+
+    fn write_dr_test_wav(path: &Path, target_dr: f64) {
+        let b = 132_480usize; // 44.1 kHz PMF block length
+        let top_amp = 10.0_f64.powf(-target_dr / 20.0);
+        let mut l = Vec::with_capacity(10 * b);
+        let mut r = Vec::with_capacity(10 * b);
+        for blk in 0..10 {
+            let scale = if blk < 2 { 1.0 } else { 0.25 };
+            for j in 0..b {
+                let t = ((blk * b + j) as f64) / 44_100.0;
+                let s = top_amp * scale * (2.0 * std::f64::consts::PI * 997.0 * t).sin();
+                let sample = if blk < 2 && j == 1000 { 0.999999 } else { s };
+                l.push(sample);
+                r.push(sample);
+            }
+        }
+        write_pcm24_stereo_wav(path, 44_100, &l, &r);
     }
 
     fn gen_sine(sr: u32, secs: usize, freq: f64, amp: f64) -> Vec<f64> {
@@ -167,27 +199,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&album_dir);
         std::fs::create_dir_all(&album_dir).unwrap();
 
-        let make_dr_track = |fname: &str, target_dr: f64| {
-            let b = 132_480usize; // 44.1 kHz PMF block length
-            let top_amp = 10.0_f64.powf(-target_dr / 20.0);
-            let mut l = Vec::with_capacity(10 * b);
-            let mut r = Vec::with_capacity(10 * b);
-            for blk in 0..10 {
-                let scale = if blk < 2 { 1.0 } else { 0.25 };
-                for j in 0..b {
-                    let t = ((blk * b + j) as f64) / 44_100.0;
-                    let s = top_amp * scale * (2.0 * std::f64::consts::PI * 997.0 * t).sin();
-                    let sample = if blk < 2 && j == 1000 { 0.999999 } else { s };
-                    l.push(sample);
-                    r.push(sample);
-                }
-            }
-            write_pcm24_stereo_wav(&album_dir.join(fname), 44_100, &l, &r);
-        };
-
-        make_dr_track("01 - Track\u{2019}s Title.wav", 8.0);
-        make_dr_track("02 - \u{65e5}\u{672c}\u{8a9e}\u{30c8}\u{30e9}\u{30c3}\u{30af} \u{2014} \u{442}\u{435}\u{441}\u{442}.wav", 10.0);
-        make_dr_track("03 - Caf\u{00e9} Cr\u{00e8}me.wav", 12.0);
+        write_dr_test_wav(&album_dir.join("01 - Track\u{2019}s Title.wav"), 8.0);
+        write_dr_test_wav(
+            &album_dir.join("02 - \u{65e5}\u{672c}\u{8a9e}\u{30c8}\u{30e9}\u{30c3}\u{30af} \u{2014} \u{442}\u{435}\u{441}\u{442}.wav"),
+            10.0,
+        );
+        write_dr_test_wav(&album_dir.join("03 - Caf\u{00e9} Cr\u{00e8}me.wav"), 12.0);
 
         let mut files: Vec<_> = std::fs::read_dir(&album_dir)
             .unwrap()
@@ -209,7 +226,7 @@ mod tests {
             assert_eq!(track.bits_used, Some(24));
             assert!(track.max_tpl_joint >= track.max_sppm_joint - 0.01);
 
-            let single_log = format_single_file_log(&track, &cfg.single_rows);
+            let single_log = format_single_file_log(&track, &cfg.single_rows, &cfg.log_filenames);
             let lines: Vec<&str> = single_log.lines().collect();
             assert!(!single_log.contains("Absolute Path:"));
             assert_eq!(lines.len(), 18, "Single log line count mismatch");
@@ -228,7 +245,9 @@ mod tests {
         let folder_log = format_folder_log(
             &album_dir,
             &tracks,
+            cfg.folder_log_style,
             &cfg.folder_columns,
+            &cfg.log_filenames,
             cfg.surround_folder_mode,
         );
         let flines: Vec<&str> = folder_log.lines().collect();
@@ -509,7 +528,7 @@ mod tests {
         // Verify Single-File Log dynamically scales width for 6 channels (49 + 7 * 19 = 182 chars)
         // Note: For >2 channels, Line 3 is "Channel Layout: ...", so metric rows start at Line 9
         let mut cfg = AppConfig::default();
-        let single_log = format_single_file_log(&track_no_lfe_dr, &cfg.single_rows);
+        let single_log = format_single_file_log(&track_no_lfe_dr, &cfg.single_rows, &cfg.log_filenames);
         assert!(!single_log.contains("Absolute Path:"));
         let s_lines: Vec<&str> = single_log.lines().collect();
         assert!(s_lines[3].starts_with("Channel Layout:"));
@@ -522,7 +541,9 @@ mod tests {
         let folder_log = format_folder_log(
             &temp_dir,
             &[track_no_lfe_dr],
+            cfg.folder_log_style,
             &cfg.folder_columns,
+            &cfg.log_filenames,
             cfg.surround_folder_mode,
         );
         assert!(folder_log.contains("TPL L"));
@@ -722,20 +743,66 @@ mod tests {
 
     #[test]
     fn test_theme_config_defaults_and_presets() {
-        use crate::config::{FolderColumnsConfig, ThemeMode};
+        use crate::config::{FolderColumnsConfig, FolderLogStyle, ThemeMode};
 
         let def = AppConfig::default();
         assert_eq!(def.theme, ThemeMode::System);
+        assert_eq!(def.folder_log_style, FolderLogStyle::TruePeaksTable);
+        assert!(!def.recurse_subfolders);
+        assert!(!def.combine_dropped_folders);
+        assert!(!def.overwrite_existing_logs);
+        assert!(!def.log_filenames.limit_length);
+        assert_eq!(def.log_filenames.max_length, 64);
+        assert!(!def.log_filenames.strip_non_ascii);
         assert_eq!(def.folder_log_pattern, "DR.txt");
         assert!((def.log_font_size - 13.5).abs() < 1e-6);
+        assert_eq!(def.window_x, None);
+        assert_eq!(def.window_y, None);
+        assert!((def.window_width - crate::config::DEFAULT_WINDOW_WIDTH).abs() < 1e-6);
+        assert!((def.window_height - crate::config::DEFAULT_WINDOW_HEIGHT).abs() < 1e-6);
+        assert!(!def.has_saved_window_position());
 
+        assert_eq!(FolderLogStyle::all().len(), 3);
         assert_eq!(ThemeMode::System.next(), ThemeMode::Dark);
         assert_eq!(ThemeMode::Dark.next(), ThemeMode::Light);
         assert_eq!(ThemeMode::Light.next(), ThemeMode::System);
 
-        // Existing configs without a `theme` field must deserialize to System default
+        // Existing configs without new fields must deserialize to safe defaults
         let parsed: AppConfig = toml::from_str("save_logs_to_disk = true\n").unwrap();
         assert_eq!(parsed.theme, ThemeMode::System);
+        assert_eq!(parsed.folder_log_style, FolderLogStyle::TruePeaksTable);
+        assert!(!parsed.recurse_subfolders);
+        assert!(!parsed.combine_dropped_folders);
+        assert!(!parsed.overwrite_existing_logs);
+        assert!(!parsed.log_filenames.limit_length);
+        assert_eq!(parsed.log_filenames.max_length, 64);
+        assert!(!parsed.log_filenames.strip_non_ascii);
+        assert_eq!(parsed.window_x, None);
+        assert!((parsed.window_width - 980.0).abs() < 1e-6);
+        assert!((parsed.window_height - 660.0).abs() < 1e-6);
+
+        // Window geometry sanitization: reject Windows minimized (-32000) & clamp size, keep valid secondary monitor coords
+        let mut bad_win = AppConfig::default();
+        bad_win.window_x = Some(-32000.0);
+        bad_win.window_y = Some(-32000.0);
+        bad_win.window_width = 160.0;
+        bad_win.window_height = f32::NAN;
+        bad_win.sanitize_window_geometry();
+        assert_eq!(bad_win.window_x, None);
+        assert_eq!(bad_win.window_y, None);
+        assert!((bad_win.window_width - crate::config::MIN_WINDOW_WIDTH).abs() < 1e-6);
+        assert!((bad_win.window_height - crate::config::DEFAULT_WINDOW_HEIGHT).abs() < 1e-6);
+
+        let mut dual_mon = AppConfig::default();
+        dual_mon.window_x = Some(-1280.0);
+        dual_mon.window_y = Some(90.0);
+        dual_mon.window_width = 1120.0;
+        dual_mon.window_height = 740.0;
+        dual_mon.sanitize_window_geometry();
+        assert_eq!(dual_mon.window_x, Some(-1280.0));
+        assert_eq!(dual_mon.window_y, Some(90.0));
+        assert!((dual_mon.window_width - 1120.0).abs() < 1e-6);
+        assert!((dual_mon.window_height - 740.0).abs() < 1e-6);
 
         let minimal = FolderColumnsConfig::minimal();
         assert!(minimal.dr_pmf && !minimal.max_tpl_left && !minimal.lra);
@@ -745,6 +812,251 @@ mod tests {
         let all = FolderColumnsConfig::all_enabled();
         assert!(all.file_name && all.bits_used && all.plr && all.min_psr);
         assert_eq!(all.active_count(), (26, 26));
+    }
+
+    #[test]
+    fn test_folder_log_styles_tree_and_multi_drop() {
+        use crate::config::FolderLogStyle;
+        use crate::scanner::{spawn_scan_job, ScanEvent, ScanTarget};
+        use crossbeam_channel::unbounded;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let run_scan_sync = |target: ScanTarget, cfg: AppConfig| -> (String, Vec<PathBuf>, usize, usize) {
+            let (tx, rx) = unbounded();
+            let cancel = Arc::new(AtomicBool::new(false));
+            spawn_scan_job(target, cfg, cancel, tx);
+            for ev in rx.iter() {
+                match ev {
+                    ScanEvent::Completed {
+                        log_text,
+                        saved_paths,
+                        tracks_count,
+                        folders_count,
+                        ..
+                    } => return (log_text, saved_paths, tracks_count, folders_count),
+                    ScanEvent::Error(e) => panic!("Unexpected scan error: {}", e),
+                    ScanEvent::Cancelled => panic!("Unexpected scan cancellation"),
+                    ScanEvent::Started { .. } | ScanEvent::Progress { .. } => {}
+                }
+            }
+            panic!("Scan channel closed before completion")
+        };
+
+        let temp_root = std::env::temp_dir().join("truepeaks_styles_tree_tests");
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let disc1 = temp_root.join("Disc 1");
+        let bonus = disc1.join("Bonus");
+        std::fs::create_dir_all(&bonus).unwrap();
+
+        let p_intro = temp_root.join("01_intro.wav");
+        let p_disc1 = disc1.join("01_track_a.wav");
+        let p_bonus = bonus.join("02_track_b.wav");
+        write_dr_test_wav(&p_intro, 10.0);
+        write_dr_test_wav(&p_disc1, 8.0);
+        write_dr_test_wav(&p_bonus, 12.0);
+
+        let cancel = AtomicBool::new(false);
+        let tracks = vec![
+            analyze_file(&p_intro, false, &cancel).unwrap(),
+            analyze_file(&p_disc1, false, &cancel).unwrap(),
+            analyze_file(&p_bonus, false, &cancel).unwrap(),
+        ];
+
+        // 1. Classic foo_dr style: omits foobar2000 & log date lines, matches exact columns & footer
+        let cfg = AppConfig::default();
+        let classic = format_folder_log(
+            &temp_root,
+            &tracks,
+            FolderLogStyle::ClassicFooDr,
+            &cfg.folder_columns,
+            &cfg.log_filenames,
+            cfg.surround_folder_mode,
+        );
+        assert!(!classic.contains("foobar2000"));
+        assert!(!classic.contains("Dynamic Range Meter"));
+        assert!(!classic.contains("log date:"));
+        let clines: Vec<&str> = classic.lines().collect();
+        assert_eq!(clines[0], "-".repeat(80));
+        assert_eq!(clines[1], "Analyzed: truepeaks_styles_tree_tests");
+        assert_eq!(clines[4], "DR         Peak         RMS     Duration Track");
+        assert!(clines[6].starts_with("DR10     "));
+        assert!(clines[6].contains(" dB"));
+        assert!(clines[6].ends_with("01_intro"));
+        assert!(classic.contains("Number of tracks:  3"));
+        assert!(classic.contains("Official DR value: DR10"));
+        assert!(classic.contains("Samplerate:        44100 Hz"));
+        assert!(classic.contains("Channels:          2"));
+        assert!(classic.contains("Bits per sample:   24"));
+        assert!(classic.contains("Bitrate:           "));
+        assert!(classic.contains("Codec:             PCM (WAV)"));
+        assert_eq!(clines.last().copied(), Some("=".repeat(80).as_str()));
+
+        // 2. Compact Mastering style: pure ASCII with summary header + key dynamics columns
+        let compact = format_folder_log(
+            &temp_root,
+            &tracks,
+            FolderLogStyle::CompactMastering,
+            &cfg.folder_columns,
+            &cfg.log_filenames,
+            cfg.surround_folder_mode,
+        );
+        assert!(compact.is_ascii());
+        assert!(compact.contains("Album:   truepeaks_styles_tree_tests"));
+        assert!(compact.contains("Summary: DR10 (Official) | 3 tracks"));
+        assert!(compact.contains("Metrics: Avg "));
+        assert!(compact.contains("TPL dBTP"));
+        assert!(compact.contains("LUFSi"));
+        assert!(compact.contains("PSR"));
+
+        // 3. Default scan does NOT recurse into subdirectories (only sees 1 root file)
+        let mut flat_cfg = AppConfig::default();
+        flat_cfg.save_logs_to_disk = false;
+        let (_flat_log, flat_saved, flat_tracks, flat_folders) =
+            run_scan_sync(ScanTarget::Folder(temp_root.clone()), flat_cfg);
+        assert!(flat_saved.is_empty());
+        assert_eq!(flat_tracks, 1);
+        assert_eq!(flat_folders, 1);
+
+        // 4. Recursive scan discovers nested subdirectories without ASCII directory tree diagram
+        let mut rec_cfg = AppConfig::default();
+        rec_cfg.recurse_subfolders = true;
+        rec_cfg.save_logs_to_disk = false;
+        let (rec_log, _, rec_tracks, _) =
+            run_scan_sync(ScanTarget::Folder(temp_root.clone()), rec_cfg);
+        assert_eq!(rec_tracks, 3);
+        assert!(rec_log.is_ascii());
+        assert!(!rec_log.contains("Directory Tree:"));
+        assert!(!rec_log.contains("|-- "));
+        assert!(!rec_log.contains("\\-- "));
+        assert!(rec_log.contains("Directory: truepeaks_styles_tree_tests/Disc 1  (DR8 | 1 track)"));
+        assert!(rec_log.contains("Directory: truepeaks_styles_tree_tests/Disc 1/Bonus  (DR12 | 1 track)"));
+        assert!(rec_log.contains("Scan Summary: 3 folders | 3 tracks | Official Overall DR: 10"));
+
+        // 5. Multi-folder drop: separate log per directory by default
+        let multi_root = temp_root.join("MultiDrop");
+        let dir_a = multi_root.join("Album A");
+        let dir_b = multi_root.join("Album B");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        write_dr_test_wav(&dir_a.join("01_a.wav"), 8.0);
+        write_dr_test_wav(&dir_b.join("01_b.wav"), 12.0);
+
+        let sep_cfg = AppConfig::default();
+        let (_sep_log, sep_saved, sep_tracks, sep_folders) = run_scan_sync(
+            ScanTarget::Multi {
+                dirs: vec![dir_a.clone(), dir_b.clone()],
+                files: Vec::new(),
+            },
+            sep_cfg,
+        );
+        assert_eq!(sep_tracks, 2);
+        assert_eq!(sep_folders, 2);
+        assert_eq!(sep_saved.len(), 2);
+        assert!(dir_a.join("DR.txt").is_file());
+        assert!(dir_b.join("DR.txt").is_file());
+
+        // 6. Multi-folder drop with combine_dropped_folders = true -> single combined log
+        let _ = std::fs::remove_file(dir_a.join("DR.txt"));
+        let _ = std::fs::remove_file(dir_b.join("DR.txt"));
+        let mut comb_cfg = AppConfig::default();
+        comb_cfg.combine_dropped_folders = true;
+        let (comb_log, comb_saved, comb_tracks, comb_folders) = run_scan_sync(
+            ScanTarget::Multi {
+                dirs: vec![dir_a.clone(), dir_b.clone()],
+                files: Vec::new(),
+            },
+            comb_cfg,
+        );
+        assert_eq!(comb_tracks, 2);
+        assert_eq!(comb_folders, 2);
+        assert_eq!(comb_saved.len(), 1);
+        assert_eq!(comb_saved[0], multi_root.join("DR.txt"));
+        assert!(multi_root.join("DR.txt").is_file());
+        assert!(!dir_a.join("DR.txt").exists());
+        assert!(!dir_b.join("DR.txt").exists());
+        assert!(comb_log.contains("Combined Batch Analysis: 2 folders | 2 tracks | Official Overall DR: 10"));
+        assert!(!comb_log.contains("Dropped Folders"));
+        assert!(!comb_log.contains("|-- "));
+        assert!(!comb_log.contains("\\-- "));
+        assert!(comb_log.contains("Directory: Album A  (DR8 | 1 track)"));
+        assert!(comb_log.contains("Directory: Album B  (DR12 | 1 track)"));
+        assert!(comb_log.contains("Combined Summary: 2 folders | 2 tracks | Official Overall DR: 10"));
+
+        // 7. Existing log preservation (default: number _2, _3) vs overwrite option
+        assert_eq!(
+            crate::formatter::numbered_candidate_path(Path::new("album/report"), 2),
+            PathBuf::from("album/report_2")
+        );
+        std::fs::write(dir_a.join("DR.txt"), "ORIGINAL LOG").unwrap();
+        let (_, saved2, _, _) =
+            run_scan_sync(ScanTarget::Folder(dir_a.clone()), AppConfig::default());
+        assert_eq!(saved2, vec![dir_a.join("DR_2.txt")]);
+        assert!(dir_a.join("DR_2.txt").is_file());
+        assert_eq!(std::fs::read_to_string(dir_a.join("DR.txt")).unwrap(), "ORIGINAL LOG");
+
+        let (_, saved3, _, _) =
+            run_scan_sync(ScanTarget::Folder(dir_a.clone()), AppConfig::default());
+        assert_eq!(saved3, vec![dir_a.join("DR_3.txt")]);
+        assert!(dir_a.join("DR_3.txt").is_file());
+
+        let mut overwrite_cfg = AppConfig::default();
+        overwrite_cfg.overwrite_existing_logs = true;
+        let (ov_log, saved_ov, _, _) =
+            run_scan_sync(ScanTarget::Folder(dir_a.clone()), overwrite_cfg);
+        assert_eq!(saved_ov, vec![dir_a.join("DR.txt")]);
+        assert!(!dir_a.join("DR_4.txt").exists());
+        let dr_contents = std::fs::read_to_string(dir_a.join("DR.txt")).unwrap();
+        assert_ne!(dr_contents, "ORIGINAL LOG");
+        assert!(dr_contents.contains("Album A") && ov_log.contains("Official EP/Album DR:"));
+
+        // 8. Logged track filename restriction (chars limit) and non-ASCII stripping inside logs only
+        use crate::config::LogFilenameOptions;
+        use crate::formatter::format_log_track_name;
+
+        let default_name_opts = LogFilenameOptions::default();
+        assert_eq!(
+            format_log_track_name("02 - 日本語トラック — тест", &default_name_opts),
+            "02 - 日本語トラック — тест"
+        );
+
+        let long_unicode = "01 - Track\u{2019}s Extraordinarily Long Symphony Title For Testing Sixty Four Character Truncation";
+        let mut trunc_opts = LogFilenameOptions::default();
+        trunc_opts.limit_length = true;
+        let trunc_out = format_log_track_name(long_unicode, &trunc_opts);
+        assert!(trunc_out.chars().count() <= 64);
+        assert!(trunc_out.ends_with("..."));
+        assert!(trunc_out.contains('\u{2019}'));
+
+        let both_opts = LogFilenameOptions {
+            limit_length: true,
+            max_length: 20,
+            strip_non_ascii: true,
+        };
+        let stripped_trunc = format_log_track_name(long_unicode, &both_opts);
+        assert!(stripped_trunc.is_ascii());
+        assert!(stripped_trunc.chars().count() <= 20);
+        assert!(stripped_trunc.ends_with("..."));
+        assert_eq!(format_log_track_name("日本語", &both_opts), "[track]");
+
+        let mut custom_track = tracks[0].clone();
+        custom_track.file_stem = "03 - Café Crème Symphony Movement Number One Extremely Long Edition Title".to_string();
+        let single_mod = format_single_file_log(&custom_track, &cfg.single_rows, &both_opts);
+        assert!(single_mod.contains("File Name:     03 - Caf Crme Sym..."));
+        for style in FolderLogStyle::all() {
+            let folder_mod = format_folder_log(
+                &temp_root,
+                std::slice::from_ref(&custom_track),
+                *style,
+                &cfg.folder_columns,
+                &both_opts,
+                cfg.surround_folder_mode,
+            );
+            assert!(folder_mod.contains("03 - Caf Crme Sym..."));
+            assert!(!folder_mod.contains("Café"));
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 }
 

@@ -1,11 +1,12 @@
 pub mod folder_log;
 pub mod single_log;
 
-use crate::config::{CharsetMode, LineEndingMode};
+use crate::config::{CharsetMode, LineEndingMode, LogFilenameOptions};
 use chrono::Local;
 use encoding_rs::WINDOWS_1252;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthStr;
 
@@ -19,6 +20,33 @@ pub fn format_sample_rate(sr: u32) -> String {
 
 pub fn normalize_nfc(s: &str) -> String {
     s.nfc().collect::<String>()
+}
+
+pub fn format_log_track_name(raw: &str, opts: &LogFilenameOptions) -> String {
+    let mut out = if opts.strip_non_ascii {
+        let ascii_only: String = raw
+            .chars()
+            .filter(|c| c.is_ascii() && !c.is_ascii_control())
+            .collect();
+        let trimmed = ascii_only.trim();
+        if trimmed.is_empty() {
+            "[track]".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        raw.to_string()
+    };
+
+    if opts.limit_length {
+        let max_len = opts.max_length.clamp(8, 255);
+        if out.chars().count() > max_len {
+            let prefix: String = out.chars().take(max_len - 3).collect();
+            out = format!("{}...", prefix.trim_end());
+        }
+    }
+
+    out
 }
 
 pub fn folder_display_name(dir: &Path, fallback: &str) -> String {
@@ -91,14 +119,68 @@ pub fn encode_log_bytes(text: &str, charset: CharsetMode, line_ending: LineEndin
     }
 }
 
+pub fn numbered_candidate_path(path: &Path, index: usize) -> PathBuf {
+    let parent = path.parent();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("DR"));
+    let numbered_name = match path.extension().map(|e| e.to_string_lossy()) {
+        Some(ext) if !ext.is_empty() => format!("{}_{}.{}", stem, index, ext),
+        _ => format!("{}_{}", stem, index),
+    };
+    match parent {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(numbered_name),
+        _ => PathBuf::from(numbered_name),
+    }
+}
+
 pub fn write_log_file(
     path: &Path,
     text: &str,
     charset: CharsetMode,
     line_ending: LineEndingMode,
-) -> Result<(), String> {
+    overwrite: bool,
+) -> Result<PathBuf, String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to prepare log directory {:?}: {}", parent, e))?;
+        }
+    }
+
     let bytes = encode_log_bytes(text, charset, line_ending);
-    fs::write(path, bytes).map_err(|e| format!("Failed to write log file {:?}: {}", path, e))
+    if overwrite {
+        fs::write(path, &bytes)
+            .map_err(|e| format!("Failed to write log file {:?}: {}", path, e))?;
+        return Ok(path.to_path_buf());
+    }
+
+    let mut candidate = path.to_path_buf();
+    let mut suffix = 2usize;
+    loop {
+        match OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(mut file) => {
+                file.write_all(&bytes)
+                    .map_err(|e| format!("Failed to write log file {:?}: {}", candidate, e))?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if suffix > 1_000_000 {
+                    return Err(format!(
+                        "Too many existing numbered log files starting from {:?}",
+                        path
+                    ));
+                }
+                candidate = numbered_candidate_path(path, suffix);
+                suffix += 1;
+            }
+            Err(e) => {
+                return Err(format!("Failed to write log file {:?}: {}", candidate, e));
+            }
+        }
+    }
 }
 
 pub fn expand_filename_pattern(
