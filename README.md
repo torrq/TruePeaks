@@ -66,7 +66,7 @@ Floating-point streams (`f32`, `f64`) are promoted to `f64` directly without int
 To detect zero-padded lossless [audio bit depth](https://en.wikipedia.org/wiki/Audio_bit_depth) containers (such as 16-bit audio stored inside a 24-bit WAV or FLAC file), `TruePeaks` left-aligns every lossless integer sample to the most significant bits of an unsigned 32-bit word (`U8 << 24`, `S16 << 16`, `S24 << 8`, `S32 << 0`) and accumulates a [bitwise OR](https://en.wikipedia.org/wiki/Bitwise_operation) mask across the entire track:
 
 $$
-M = \bigvee_{n=0}^{N-1} \bigvee_{c=0}^{C-1} \operatorname{MSB}_{32}\!\left(s_c[n]\right)
+M = \bigvee_{n=0}^{N-1} \bigvee_{c=0}^{C-1} \mathrm{MSB}_{32}\!\left(s_c[n]\right)
 $$
 
 The effective active bit depth is determined by counting trailing zero bits ([find first set / trailing zero count](https://en.wikipedia.org/wiki/Find_first_set)) from the LSB:
@@ -75,11 +75,11 @@ $$
 \text{Bits Used} =
 \begin{cases}
 0, & M = 0 \text{ (digital silence)} \\
-32 - \operatorname{tzcnt}(M), & M \neq 0
+32 - \mathrm{tzcnt}(M), & M \neq 0
 \end{cases}
 $$
 
-For example, if 16-bit PCM sits inside 24-bit words with zeroed lowest 8 bits, the bottom 16 bits of $M$ are zero ($\operatorname{tzcnt}(M) = 16$), giving $\text{Bits Used} = 16$. Lossy codecs (`MP3`, `AAC`, `Vorbis`) and floating-point PCM report `-` (`None`).
+For example, if 16-bit PCM sits inside 24-bit words with zeroed lowest 8 bits, the bottom 16 bits of $M$ are zero ($\mathrm{tzcnt}(M) = 16$), giving $\text{Bits Used} = 16$. Lossy codecs (`MP3`, `AAC`, `Vorbis`) and floating-point PCM report `-` (`None`).
 
 ---
 
@@ -102,7 +102,7 @@ Continuous-time reconstruction between discrete PCM samples (via the [Whittakerâ
 
 $$
 w[j] = \frac{1}{2}\!\left(1 - \cos\!\left(\frac{2\pi j}{48}\right)\right), \qquad
-h[j] = w[j] \cdot \operatorname{sinc}\!\left(\frac{j - 24}{F}\right)
+h[j] = w[j] \cdot \mathrm{sinc}\!\left(\frac{j - 24}{F}\right)
 $$
 
 where the [oversampling](https://en.wikipedia.org/wiki/Oversampling) factor $F$ adapts to sample rate (and its corresponding [Nyquist frequency](https://en.wikipedia.org/wiki/Nyquist_frequency)):
@@ -222,10 +222,13 @@ $$
 Computed per [ITU-R BS.1770](https://en.wikipedia.org/wiki/LUFS) / [EBU R 128](https://en.wikipedia.org/wiki/EBU_R_128) dual-gated $400\text{ ms}$ overlapping blocks ($100\text{ ms}$ step / $75\%$ overlap):
 
 1. **Absolute Gate ($\Gamma_a = -70.0\text{ LUFS}$):** Retain all block energies $z_j$ with $L(z_j) > -70.0\text{ LUFS}$ and compute intermediate loudness and relative gate:
+
    $$
    \Gamma_r = -0.691 + 10\log_{10}\!\left(\frac{1}{|J_a|}\sum_{j \in J_a} z_j\right) - 10.0\text{ LU}
    $$
+
 2. **Relative Gate ($\Gamma_r$):** Retain blocks $J_r = \{j \in J_a : L(z_j) > \Gamma_r\}$:
+
    $$
    \text{LUFS}_i = -0.691 + 10\log_{10}\!\left(\frac{1}{|J_r|}\sum_{j \in J_r} z_j\right)
    $$
@@ -314,10 +317,13 @@ p_{c,b} = \max_{n \in \text{block } b} |x_c[n]|
 $$
 
 1. **Top 20% Loudest Block [RMS](https://en.wikipedia.org/wiki/Root_mean_square) ($R_{20, c}$):** Sort $\{\sigma_{c,b}^2\}$ descending as $\sigma_{c,(1)}^2 \ge \sigma_{c,(2)}^2 \ge \dots \ge \sigma_{c,(K)}^2$, select $M = \max(1, \lfloor 0.20\,K \rfloor)$:
+
    $$
    R_{20, c} = \sqrt{\frac{1}{M}\sum_{i=1}^{M} \sigma_{c,(i)}^2}
    $$
+
 2. **Second-Highest Block Peak ($P_{2, c}$):** Sort $\{p_{c,b}\}$ descending as $p_{c,(1)} \ge p_{c,(2)} \ge \dots$, discarding the single loudest block peak so isolated transient spikes do not inflate the rating:
+
    $$
    P_{2,c} =
    \begin{cases}
@@ -325,19 +331,22 @@ $$
    p_{c,(1)}, & K = 1
    \end{cases}
    $$
+
 3. **Channel DR ([crest factor](https://en.wikipedia.org/wiki/Crest_factor) of top-20% RMS vs 2nd block peak in dB):**
+
    $$
    \text{DR}_c = 20\log_{10}\!\left(\frac{P_{2,c}}{R_{20,c}}\right)
    $$
+
 4. **Joint Track DR & Official Album DR:** Let $A$ be active channels (excluding `LFE` by default, or all channels if `include_lfe_in_dr` is enabled or all channels are LFE). Averaging uses unrounded floating-point $\text{DR}_c$ and $\text{DR}_{\text{track, raw}}^{(t)}$ across all $T$ tracks before rounding to nearest integer (`round()`):
 
 $$
 \text{DR}_{\text{track, raw}} = \frac{1}{|A|}\sum_{c \in A} \text{DR}_c, \qquad
-\text{DR}_{\text{track}} = \operatorname{round}\!\left(\text{DR}_{\text{track, raw}}\right)
+\text{DR}_{\text{track}} = \mathrm{round}\!\left(\text{DR}_{\text{track, raw}}\right)
 $$
 
 $$
-\text{Official Album DR} = \operatorname{round}\!\left(\frac{1}{T}\sum_{t=1}^{T} \text{DR}_{\text{track, raw}}^{(t)}\right)
+\text{Official Album DR} = \mathrm{round}\!\left(\frac{1}{T}\sum_{t=1}^{T} \text{DR}_{\text{track, raw}}^{(t)}\right)
 $$
 
 *(Because whole-track $\text{RMS}_{\text{AES17}, c} = 10\log_{10}\!\left(\frac{1}{K}\sum_{b=1}^K \sigma_{c,b}^2\right)$ for uniform blocks, `dr_pmf` also computes per-channel AES17 RMS over block energies.)*
@@ -349,7 +358,7 @@ $$
 When generating the `Classic DR (foo_dr Style)` album metadata block, aggregate bitrate across $T$ analyzed files is computed from total on-disk file sizes and total decoded audio duration:
 
 $$
-\text{Bitrate (kbps)} = \operatorname{round}\!\left(\frac{8 \sum_{t=1}^{T} \text{bytes}_t}{1000 \sum_{t=1}^{T} (N_t / f_{s,t})}\right)
+\text{Bitrate (kbps)} = \mathrm{round}\!\left(\frac{8 \sum_{t=1}^{T} \text{bytes}_t}{1000 \sum_{t=1}^{T} (N_t / f_{s,t})}\right)
 $$
 
 ---

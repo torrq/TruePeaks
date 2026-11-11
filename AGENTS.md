@@ -4,7 +4,7 @@
 
 Whenever any DSP algorithm, mathematical formula, filter coefficient, block length, window function, channel weighting, gating threshold, rounding rule, bit-depth mask, or bitrate calculation is modified (across `src/dsp/`, `src/decoder/`, or `src/formatter/`):
 
-1. **Update [`README.md`](README.md):** Update the corresponding equations, descriptions, and constants in the **Mathematical Specification** section, keeping Wikipedia links accurate for common formulas and DSP concepts.
+1. **Update [`README.md`](README.md):** Update the corresponding equations, descriptions, and constants in the **Mathematical Specification** section, keeping Wikipedia links accurate for common formulas and DSP concepts (use GitHub-compatible LaTeX such as `\mathrm{...}` — avoid blocked macros like `\operatorname`).
 2. **Update the About View in [`src/app.rs`](src/app.rs):** Update `render_about_math_details` (the **DSP & Math Details** tab of the About screen, plus the **Overview** summary row in `render_about_overview` if applicable) so the built-in documentation matches both the code and `README.md`.
 
 ## Project Practices
