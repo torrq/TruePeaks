@@ -29,6 +29,12 @@ enum ActiveView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AboutTab {
+    Overview,
+    MathDetails,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
     Appearance,
     FolderLogs,
@@ -244,6 +250,7 @@ pub struct TruePeaksApp {
     last_saved_paths: Vec<PathBuf>,
     log_preview: String,
     copied_at: Option<Instant>,
+    about_tab: AboutTab,
     about_url_copied_at: Option<Instant>,
 
     // Window geometry persistence
@@ -273,6 +280,7 @@ impl TruePeaksApp {
             last_saved_paths: Vec::new(),
             log_preview: String::new(),
             copied_at: None,
+            about_tab: AboutTab::Overview,
             about_url_copied_at: None,
             window_frames_seen: 0,
             window_save_pending_at: None,
@@ -689,11 +697,12 @@ impl TruePeaksApp {
                         ))
                         .clicked()
                     {
-                        self.active_view = if is_about {
-                            ActiveView::Analyzer
+                        if is_about {
+                            self.active_view = ActiveView::Analyzer;
                         } else {
-                            ActiveView::About
-                        };
+                            self.about_tab = AboutTab::Overview;
+                            self.active_view = ActiveView::About;
+                        }
                     }
 
                     ui.separator();
@@ -1303,8 +1312,12 @@ impl TruePeaksApp {
         let repo_url = env!("CARGO_PKG_REPOSITORY");
         let version = env!("CARGO_PKG_VERSION");
         let description = env!("CARGO_PKG_DESCRIPTION");
-        let license = env!("CARGO_PKG_LICENSE");
         let accent_text = if pal.dark { pal.accent_hover } else { pal.accent };
+
+        let max_card_w = match self.about_tab {
+            AboutTab::Overview => 620.0,
+            AboutTab::MathDetails => 780.0,
+        };
 
         egui::ScrollArea::vertical()
             .id_salt("about_view_scroll")
@@ -1312,8 +1325,11 @@ impl TruePeaksApp {
             .show(ui, |ui| {
                 let avail_w = ui.available_width();
                 let avail_h = ui.available_height();
-                let card_w = (avail_w - 40.0).clamp(320.0, 620.0);
-                let top_pad = ((avail_h - 470.0) * 0.35).max(20.0);
+                let card_w = (avail_w - 40.0).clamp(320.0, max_card_w);
+                let top_pad = match self.about_tab {
+                    AboutTab::Overview => ((avail_h - 500.0) * 0.35).max(20.0),
+                    AboutTab::MathDetails => 20.0,
+                };
 
                 ui.vertical_centered(|ui| {
                     ui.add_space(top_pad);
@@ -1365,179 +1381,422 @@ impl TruePeaksApp {
                                 });
                             });
 
-                            ui.add_space(14.0);
-                            ui.separator();
-                            ui.add_space(10.0);
-
-                            // Repository row with clickable link + Copy URL
-                            let url_copied = self
-                                .about_url_copied_at
-                                .map(|t| t.elapsed().as_secs_f32() < 2.0)
-                                .unwrap_or(false);
-                            if url_copied {
-                                ctx.request_repaint();
-                            }
-
-                            Frame::none()
-                                .fill(pal.surface_alt)
-                                .rounding(Rounding::same(8.0))
-                                .stroke(Stroke::new(1.0_f32, pal.border))
-                                .inner_margin(Margin::symmetric(14.0, 10.0))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    about_kv_row(ui, pal, "GitHub", |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.hyperlink_to(
-                                                RichText::new(repo_url)
-                                                    .size(13.5)
-                                                    .color(accent_text),
-                                                repo_url,
-                                            )
-                                            .on_hover_text("Open TruePeaks on GitHub in your browser");
-
-                                            let copy_lbl = if url_copied {
-                                                RichText::new("✓ Copied").size(12.0).color(pal.success)
-                                            } else {
-                                                RichText::new("Copy").size(12.0)
-                                            };
-                                            if ui
-                                                .add(egui::Button::new(copy_lbl).min_size(Vec2::new(0.0, 22.0)))
-                                                .on_hover_text("Copy repository URL to clipboard")
-                                                .clicked()
-                                            {
-                                                ctx.copy_text(repo_url.to_string());
-                                                self.about_url_copied_at = Some(Instant::now());
-                                            }
-                                        });
-                                    });
-
-                                    ui.add_space(6.0);
-                                    let platform = format!(
-                                        "v{}  ·  {} ({})",
-                                        version,
-                                        std::env::consts::OS,
-                                        std::env::consts::ARCH
-                                    );
-                                    about_kv_row(ui, pal, "Version", |ui| {
-                                        ui.label(RichText::new(platform).size(13.5).color(pal.text_primary));
-                                    });
-
-                                    ui.add_space(6.0);
-                                    about_kv_row(ui, pal, "License", |ui| {
-                                        ui.label(
-                                            RichText::new(format!("{} License", license))
-                                                .size(13.5)
-                                                .color(pal.text_primary),
-                                        );
-                                    });
-
-                                    ui.add_space(6.0);
-                                    about_kv_row(ui, pal, "Dynamic Range", |ui| {
-                                        ui.label(
-                                            RichText::new(
-                                                "PMF DR (top-20% 3 s RMS blocks, per-channel & joint)",
-                                            )
-                                            .size(13.0)
-                                            .color(pal.text_primary),
-                                        );
-                                    });
-
-                                    ui.add_space(6.0);
-                                    about_kv_row(ui, pal, "Loudness & Peak", |ui| {
-                                        ui.label(
-                                            RichText::new(
-                                                "ITU-R BS.1770-4 / EBU R128 (4x oversampled + 16x Kaiser Sinc)",
-                                            )
-                                            .size(13.0)
-                                            .color(pal.text_primary),
-                                        );
-                                    });
-
-                                    ui.add_space(6.0);
-                                    about_kv_row(ui, pal, "Formats", |ui| {
-                                        ui.label(
-                                            RichText::new(
-                                                "WAV, BWF, AIFF, Wave64, FLAC, ALAC, CAF, MP3, AAC, Ogg",
-                                            )
-                                            .size(13.0)
-                                            .color(pal.text_primary),
-                                        );
-                                    });
-
-                                    if let Some(cfg_path) = AppConfig::config_path() {
-                                        ui.add_space(6.0);
-                                        about_kv_row(ui, pal, "Config File", |ui| {
-                                            ui.horizontal(|ui| {
-                                                let max_p = (ui.available_width() - 68.0).max(80.0);
-                                                ui.allocate_ui_with_layout(
-                                                    Vec2::new(max_p, 20.0),
-                                                    Layout::left_to_right(Align::Center),
-                                                    |ui| {
-                                                        ui.add(
-                                                            egui::Label::new(
-                                                                RichText::new(cfg_path.display().to_string())
-                                                                    .size(12.5)
-                                                                    .color(pal.text_muted),
-                                                            )
-                                                            .truncate(),
-                                                        )
-                                                        .on_hover_text(cfg_path.display().to_string());
-                                                    },
-                                                );
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(RichText::new("Reveal").size(12.0))
-                                                            .min_size(Vec2::new(0.0, 22.0)),
-                                                    )
-                                                    .on_hover_text(format!("Locate {}", cfg_path.display()))
-                                                    .clicked()
-                                                {
-                                                    reveal_in_file_manager(&cfg_path);
-                                                }
-                                            });
-                                        });
-                                    }
-                                });
-
-                            ui.add_space(16.0);
+                            ui.add_space(12.0);
+                            // Tab strip (starts cleanly on Overview by default)
                             ui.horizontal(|ui| {
                                 if ui
                                     .add(
-                                        egui::Button::new(RichText::new("Open GitHub ↗").size(13.5))
-                                            .min_size(Vec2::new(0.0, 30.0)),
+                                        egui::Button::new(RichText::new("Overview").size(13.5))
+                                            .selected(self.about_tab == AboutTab::Overview)
+                                            .min_size(Vec2::new(0.0, 28.0)),
                                     )
-                                    .on_hover_text(repo_url)
                                     .clicked()
                                 {
-                                    ctx.open_url(egui::OpenUrl::new_tab(repo_url));
+                                    self.about_tab = AboutTab::Overview;
                                 }
-
                                 if ui
                                     .add(
-                                        egui::Button::new(RichText::new("Settings...").size(13.5))
-                                            .min_size(Vec2::new(0.0, 30.0)),
+                                        egui::Button::new(
+                                            RichText::new("DSP & Math Details").size(13.5),
+                                        )
+                                        .selected(self.about_tab == AboutTab::MathDetails)
+                                        .min_size(Vec2::new(0.0, 28.0)),
+                                    )
+                                    .on_hover_text(
+                                        "Detailed formulas, filter coefficients, and Wikipedia references",
                                     )
                                     .clicked()
                                 {
-                                    self.active_view = ActiveView::Settings;
+                                    self.about_tab = AboutTab::MathDetails;
                                 }
-
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui
-                                        .add(
-                                            primary_button("← Back to Analyzer", true, pal)
-                                                .min_size(Vec2::new(0.0, 30.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.active_view = ActiveView::Analyzer;
-                                    }
-                                });
                             });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
+                            match self.about_tab {
+                                AboutTab::Overview => {
+                                    self.render_about_overview(ui, ctx, pal, accent_text, repo_url, version);
+                                }
+                                AboutTab::MathDetails => {
+                                    self.render_about_math_details(ui, ctx, pal, accent_text, repo_url);
+                                }
+                            }
                         });
                     ui.add_space(20.0);
                 });
             });
+    }
+
+    fn render_about_overview(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        pal: &Palette,
+        accent_text: Color32,
+        repo_url: &str,
+        version: &str,
+    ) {
+        let license = env!("CARGO_PKG_LICENSE");
+        let url_copied = self
+            .about_url_copied_at
+            .map(|t| t.elapsed().as_secs_f32() < 2.0)
+            .unwrap_or(false);
+        if url_copied {
+            ctx.request_repaint();
+        }
+
+        Frame::none()
+            .fill(pal.surface_alt)
+            .rounding(Rounding::same(8.0))
+            .stroke(Stroke::new(1.0_f32, pal.border))
+            .inner_margin(Margin::symmetric(14.0, 10.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                about_kv_row(ui, pal, "GitHub", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.hyperlink_to(
+                            RichText::new(repo_url).size(13.5).color(accent_text),
+                            repo_url,
+                        )
+                        .on_hover_text("Open TruePeaks on GitHub in your browser");
+
+                        let copy_lbl = if url_copied {
+                            RichText::new("✓ Copied").size(12.0).color(pal.success)
+                        } else {
+                            RichText::new("Copy").size(12.0)
+                        };
+                        if ui
+                            .add(egui::Button::new(copy_lbl).min_size(Vec2::new(0.0, 22.0)))
+                            .on_hover_text("Copy repository URL to clipboard")
+                            .clicked()
+                        {
+                            ctx.copy_text(repo_url.to_string());
+                            self.about_url_copied_at = Some(Instant::now());
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+                let platform = format!(
+                    "v{}  ·  {} ({})",
+                    version,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                );
+                about_kv_row(ui, pal, "Version", |ui| {
+                    ui.label(RichText::new(platform).size(13.5).color(pal.text_primary));
+                });
+
+                ui.add_space(6.0);
+                about_kv_row(ui, pal, "License", |ui| {
+                    ui.label(
+                        RichText::new(format!("{} License", license))
+                            .size(13.5)
+                            .color(pal.text_primary),
+                    );
+                });
+
+                ui.add_space(6.0);
+                about_kv_row(ui, pal, "Dynamic Range", |ui| {
+                    ui.label(
+                        RichText::new("PMF DR (top-20% 3 s RMS blocks, per-channel & joint)")
+                            .size(13.0)
+                            .color(pal.text_primary),
+                    );
+                });
+
+                ui.add_space(6.0);
+                about_kv_row(ui, pal, "Loudness & Peak", |ui| {
+                    ui.label(
+                        RichText::new(
+                            "ITU-R BS.1770-4 / EBU R128 (48-tap Hann-sinc oversampled True Peak)",
+                        )
+                        .size(13.0)
+                        .color(pal.text_primary),
+                    );
+                });
+
+                ui.add_space(6.0);
+                about_kv_row(ui, pal, "Formats", |ui| {
+                    ui.label(
+                        RichText::new("WAV, BWF, AIFF, Wave64, FLAC, ALAC, CAF, MP3, AAC, Ogg")
+                            .size(13.0)
+                            .color(pal.text_primary),
+                    );
+                });
+
+                if let Some(cfg_path) = AppConfig::config_path() {
+                    ui.add_space(6.0);
+                    about_kv_row(ui, pal, "Config File", |ui| {
+                        ui.horizontal(|ui| {
+                            let max_p = (ui.available_width() - 68.0).max(80.0);
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(max_p, 20.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(cfg_path.display().to_string())
+                                                .size(12.5)
+                                                .color(pal.text_muted),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(cfg_path.display().to_string());
+                                },
+                            );
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("Reveal").size(12.0))
+                                        .min_size(Vec2::new(0.0, 22.0)),
+                                )
+                                .on_hover_text(format!("Locate {}", cfg_path.display()))
+                                .clicked()
+                            {
+                                reveal_in_file_manager(&cfg_path);
+                            }
+                        });
+                    });
+                }
+            });
+
+        ui.add_space(16.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("DSP & Math Details →").size(13.5))
+                        .min_size(Vec2::new(0.0, 30.0)),
+                )
+                .on_hover_text("View formulas, DSP pipeline details & Wikipedia links")
+                .clicked()
+            {
+                self.about_tab = AboutTab::MathDetails;
+            }
+
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Open GitHub ↗").size(13.5))
+                        .min_size(Vec2::new(0.0, 30.0)),
+                )
+                .on_hover_text(repo_url)
+                .clicked()
+            {
+                ctx.open_url(egui::OpenUrl::new_tab(repo_url));
+            }
+
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Settings...").size(13.5))
+                        .min_size(Vec2::new(0.0, 30.0)),
+                )
+                .clicked()
+            {
+                self.active_view = ActiveView::Settings;
+            }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(
+                        primary_button("← Back to Analyzer", true, pal)
+                            .min_size(Vec2::new(0.0, 30.0)),
+                    )
+                    .clicked()
+                {
+                    self.active_view = ActiveView::Analyzer;
+                }
+            });
+        });
+    }
+
+    fn render_about_math_details(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        pal: &Palette,
+        accent_text: Color32,
+        repo_url: &str,
+    ) {
+        ui.label(
+            RichText::new(
+                "All DSP metrics run in 64-bit IEEE 754 floating point (f64) across 8,192-frame chunks.",
+            )
+            .size(13.0)
+            .color(pal.text_muted),
+        );
+        ui.add_space(10.0);
+
+        math_section_card(
+            ui,
+            pal,
+            accent_text,
+            "1. PCM Normalization & Effective Bit Depth (Bits Used)",
+            "Integer samples normalize symmetrically into [-1, 1) by power-of-2 full-scale divisors. Lossless integers accumulate a 32-bit MSB-aligned bitwise OR mask across the track to detect padded bit depths (such as 16-bit audio stored inside a 24-bit WAV or FLAC container).",
+            &[
+                "x[n] = (s[n] - 128) / 2^7  [U8]    |    s[n] / 2^(b - 1)  [S16 / S24 / S32]",
+                "M    = OR_all( MSB32(s_c[n]) )     [U8 << 24, S16 << 16, S24 << 8, S32]",
+                "Bits Used = 0  (if M == 0)   |   32 - tzcnt(M)  (if M != 0)",
+            ],
+            &[
+                ("PCM", "https://en.wikipedia.org/wiki/Pulse-code_modulation"),
+                ("Audio Bit Depth", "https://en.wikipedia.org/wiki/Audio_bit_depth"),
+                ("Trailing Zero Count", "https://en.wikipedia.org/wiki/Find_first_set"),
+            ],
+        );
+
+        ui.add_space(10.0);
+        math_section_card(
+            ui,
+            pal,
+            accent_text,
+            "2. Sample Peak (SPPM) & Oversampled True Peak (TPL)",
+            "SPPM records peak raw sample magnitude in dBFS. True Peak detects inter-sample overshoots per ITU-R BS.1770-4 Annex 2 via a 48-tap Hann-windowed sinc polyphase FIR interpolator adapting factor F to sample rate.",
+            &[
+                "SPPM_c = 20 * log10( max_n |x_c[n]| ) dBFS    |    SPPM_joint = max_c SPPM_c",
+                "w[j] = 0.5 * (1 - cos(2*pi*j / 48)),   h[j] = w[j] * sinc((j - 24) / F)",
+                "F = 4x (fs < 96 kHz, 12 taps/phase)  |  2x (96-192 kHz, 24 taps/phase)  |  1x (>= 192 kHz)",
+                "TPL_c = 20 * log10( max_k |x_tilde_c[k]| ) dBTP    |    TPL_joint = max_c TPL_c",
+            ],
+            &[
+                ("dBFS", "https://en.wikipedia.org/wiki/DBFS"),
+                ("Whittaker-Shannon", "https://en.wikipedia.org/wiki/Whittaker%E2%80%93Shannon_interpolation_formula"),
+                ("Hann Window", "https://en.wikipedia.org/wiki/Hann_function"),
+                ("Sinc Filter", "https://en.wikipedia.org/wiki/Sinc_function"),
+                ("Oversampling", "https://en.wikipedia.org/wiki/Oversampling"),
+            ],
+        );
+
+        ui.add_space(10.0);
+        math_section_card(
+            ui,
+            pal,
+            accent_text,
+            "3. ITU-R BS.1770-4 K-Weighting & Channel Weights",
+            "A two-stage bilinear-transformed IIR biquad cascade models acoustic head high-frequency shelving and low-frequency rolloff before applying BS.1770 channel weights (omitting LFE).",
+            &[
+                "Stage 1 Shelf: f0 = 1681.974 Hz, G = +3.99984 dB, Q = 0.70718, K1 = tan(pi*f0/fs)",
+                "Stage 2 High-Pass (RLB): f0 = 38.1355 Hz, Q = 0.50033, b2 = [1, -2, 1]",
+                "Channel weights G_c: 1.0 (L, R, C)  |  1.41 (+1.5 dB Surrounds)  |  0.0 (LFE)",
+                "Loudness L(z) = -0.691 + 10 * log10(z) LUFS",
+            ],
+            &[
+                ("LUFS / BS.1770", "https://en.wikipedia.org/wiki/LUFS"),
+                ("Biquad Filter", "https://en.wikipedia.org/wiki/Digital_biquad_filter"),
+                ("Bilinear Transform", "https://en.wikipedia.org/wiki/Bilinear_transform"),
+                ("IIR Filter", "https://en.wikipedia.org/wiki/Infinite_impulse_response"),
+            ],
+        );
+
+        ui.add_space(10.0);
+        math_section_card(
+            ui,
+            pal,
+            accent_text,
+            "4. Continuous Sliding Momentary / Short-Term, LUFSi & LRA",
+            "Unlike coarse 100 ms hops, Momentary (400 ms) and Short-Term (3.0 s) maxima slide sample-by-sample using a 3.0 s circular buffer with periodic drift resync. Per-channel maxima apply the +3.01 dB (2x) dual-mono convention when C > 1.",
+            &[
+                "W_M = 4 * round(fs / 10) [400 ms]     |     W_S = 30 * round(fs / 10) [3.0 s]",
+                "L_M,joint[n] = -0.691 + 10 * log10( (1/W_M) * sum_c G_c * S_{M,c}[n] )",
+                "LUFSi (400 ms, 75% overlap): Gate 1 > -70.0 LUFS, Gate 2 > (L_abs - 10.0 LU)",
+                "LRA (EBU Tech 3342): P95(L_S) - P10(L_S) above -70 LUFS & (L_abs - 20.0 LU)",
+            ],
+            &[
+                ("EBU R 128", "https://en.wikipedia.org/wiki/EBU_R_128"),
+                ("Circular Buffer", "https://en.wikipedia.org/wiki/Circular_buffer"),
+                ("Percentile", "https://en.wikipedia.org/wiki/Percentile"),
+            ],
+        );
+
+        ui.add_space(10.0);
+        math_section_card(
+            ui,
+            pal,
+            accent_text,
+            "5. Continuous Min. PSR & Track PLR",
+            "PSR evaluates peak sample amplitude against active Short-Term loudness at every sample frame via an O(1) monotonic decreasing deque, while PLR measures whole-track headroom relative to LUFSi (capping true peaks above 0 dBTP at 0.0).",
+            &[
+                "P_3s[n] = max_{c, 0 <= i < W_S} |x_c[n - i]|     (trailing 3.0 s monotonic deque)",
+                "Min. PSR = 0.691 + 10 * log10( W_S * min_{L_S > -70 LUFS}( P_3s[n]^2 / sum G_c*S_{S,c}[n] ) ) LU",
+                "P_ref = 0.0 (if TPL_joint > 0.0) else max(TPL_joint, SPPM_joint)   ->   PLR = P_ref - LUFSi LU",
+            ],
+            &[
+                ("Crest Factor", "https://en.wikipedia.org/wiki/Crest_factor"),
+                ("Double-Ended Queue", "https://en.wikipedia.org/wiki/Double-ended_queue"),
+            ],
+        );
+
+        ui.add_space(10.0);
+        math_section_card(
+            ui,
+            pal,
+            accent_text,
+            "6. AES17 RMS, PMF Dynamic Range (DR) & Album Rating",
+            "AES17 RMS scales energy by 2.0 so a full-scale sine reads 0.00 dBFS. PMF splits audio into quantized blocks (~3 s), pairs top-20% RMS against the second-loudest block peak per channel, and averages unrounded values across tracks.",
+            &[
+                "RMS_AES17,c = 10 * log10( (2 / N) * sum x_c[n]^2 ) dBFS   (0 dBFS sine = 0.00 dBFS)",
+                "N_blk = 3 * (fs + 60*(fs/44100)) if 44100 | fs  (132,480 @ 44.1k)  else 3 * fs  (144,000 @ 48k)",
+                "R_20,c = sqrt( mean of top M = max(1, floor(0.20*K)) block AES17 energies )",
+                "P_2,c  = 2nd-highest block peak (or 1st if K = 1);    DR_c = 20 * log10( P_2,c / R_20,c )",
+                "DR_track = round( mean_{c in active} DR_c )   |   Album DR = round( mean_tracks DR_raw )",
+            ],
+            &[
+                ("Root Mean Square", "https://en.wikipedia.org/wiki/Root_mean_square"),
+                ("Dynamic Range", "https://en.wikipedia.org/wiki/Dynamic_range"),
+                ("Loudness War", "https://en.wikipedia.org/wiki/Loudness_war"),
+            ],
+        );
+
+        ui.add_space(10.0);
+        math_section_card(
+            ui,
+            pal,
+            accent_text,
+            "7. Combined Multi-Channel RMS & Classic Footer Bitrate",
+            "Classic foo_dr logs power-average active non-LFE channel RMS values and estimate album bitrate from total on-disk file sizes and cumulative audio duration.",
+            &[
+                "RMS_combined = 10 * log10( (1 / |A|) * sum_{c in A} 10^(RMS_AES17,c / 10) ) dB",
+                "Bitrate (kbps) = round( 8 * sum(file_bytes) / (1000 * sum(total_frames / fs)) )",
+            ],
+            &[("Arithmetic Mean", "https://en.wikipedia.org/wiki/Arithmetic_mean")],
+        );
+
+        ui.add_space(16.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("← Overview").size(13.5))
+                        .min_size(Vec2::new(0.0, 30.0)),
+                )
+                .clicked()
+            {
+                self.about_tab = AboutTab::Overview;
+            }
+
+            let readme_url = format!("{}/blob/main/README.md", repo_url);
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("Full README on GitHub ↗").size(13.5))
+                        .min_size(Vec2::new(0.0, 30.0)),
+                )
+                .on_hover_text(&readme_url)
+                .clicked()
+            {
+                ctx.open_url(egui::OpenUrl::new_tab(readme_url));
+            }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(
+                        primary_button("← Back to Analyzer", true, pal)
+                            .min_size(Vec2::new(0.0, 30.0)),
+                    )
+                    .clicked()
+                {
+                    self.active_view = ActiveView::Analyzer;
+                }
+            });
+        });
     }
 
     fn render_settings_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, pal: &Palette) {
@@ -2792,6 +3051,83 @@ fn about_kv_row(
         );
         add_value(ui);
     });
+}
+
+fn math_section_card(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    accent_text: Color32,
+    title: &str,
+    summary: &str,
+    formulas: &[&str],
+    wiki_links: &[(&str, &str)],
+) {
+    Frame::none()
+        .fill(pal.surface_alt)
+        .rounding(Rounding::same(8.0))
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .inner_margin(Margin::symmetric(14.0, 12.0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new(title)
+                    .size(14.0)
+                    .strong()
+                    .color(pal.text_primary),
+            );
+            ui.add_space(4.0);
+            ui.label(RichText::new(summary).size(12.5).color(pal.text_muted));
+            ui.add_space(8.0);
+
+            Frame::none()
+                .fill(pal.well)
+                .rounding(Rounding::same(6.0))
+                .stroke(Stroke::new(1.0_f32, pal.border))
+                .inner_margin(Margin::symmetric(10.0, 8.0))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::horizontal()
+                        .id_salt(title)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for line in formulas {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(*line)
+                                            .size(12.0)
+                                            .monospace()
+                                            .color(pal.text_primary),
+                                    )
+                                    .extend(),
+                                );
+                            }
+                        });
+                });
+
+            if !wiki_links.is_empty() {
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Wikipedia:")
+                            .size(11.5)
+                            .strong()
+                            .color(pal.text_muted),
+                    );
+                    for (idx, (label, url)) in wiki_links.iter().enumerate() {
+                        if idx > 0 {
+                            ui.label(RichText::new("·").size(11.5).color(pal.text_muted));
+                        }
+                        ui.hyperlink_to(
+                            RichText::new(format!("{} ↗", label))
+                                .size(11.5)
+                                .color(accent_text),
+                            *url,
+                        )
+                        .on_hover_text(*url);
+                    }
+                });
+            }
+        });
 }
 
 fn paint_waveform_badge(ui: &mut egui::Ui, size: f32, pal: &Palette) {
