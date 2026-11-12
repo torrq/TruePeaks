@@ -1,3 +1,5 @@
+<img width="1200" height="396" alt="TruePeaks" src="https://github.com/user-attachments/assets/6fb22e6b-4f78-4bf0-a7d2-b32a102a2e0e" />
+
 # TruePeaks
 
 High-performance, pure-Rust desktop analyzer for **[ITU-R BS.1770-4 / EBU R128](https://en.wikipedia.org/wiki/LUFS) loudness**, **oversampled True Peak**, **continuous sample-sliding PSR**, **PLR**, **LRA**, and **PMF Dynamic Range (DR)**.
