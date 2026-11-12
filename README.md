@@ -1,4 +1,4 @@
-<img width="1200" height="396" alt="TruePeaks" src="https://github.com/user-attachments/assets/6fb22e6b-4f78-4bf0-a7d2-b32a102a2e0e" />
+<img width="1117" height="332" alt="TruePeaks" src="https://github.com/user-attachments/assets/78d9488a-d954-4c08-bf55-51391d367235" />
 
 # TruePeaks
 
