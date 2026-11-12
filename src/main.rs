@@ -1150,5 +1150,27 @@ mod tests {
         }
         assert_eq!(total, 33);
     }
+
+    #[test]
+    fn test_commit_max_len_input() {
+        use crate::app::commit_max_len_input;
+
+        let mut cur = 64usize;
+        let mut s = "32".to_string();
+        assert!(commit_max_len_input(&mut s, &mut cur));
+        assert_eq!((cur, s.as_str()), (32, "32"));
+
+        s = "4".to_string();
+        assert!(commit_max_len_input(&mut s, &mut cur));
+        assert_eq!((cur, s.as_str()), (8, "8"));
+
+        s = "999".to_string();
+        assert!(commit_max_len_input(&mut s, &mut cur));
+        assert_eq!((cur, s.as_str()), (255, "255"));
+
+        s = "".to_string();
+        assert!(!commit_max_len_input(&mut s, &mut cur));
+        assert_eq!((cur, s.as_str()), (255, "255"));
+    }
 }
 

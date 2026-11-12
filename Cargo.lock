@@ -3702,7 +3702,7 @@ dependencies = [
 
 [[package]]
 name = "truepeaks"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "crossbeam-channel",

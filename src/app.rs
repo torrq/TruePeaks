@@ -256,6 +256,7 @@ pub struct TruePeaksApp {
     about_tab: AboutTab,
     about_url_copied_at: Option<Instant>,
     math_svg_cache: MathSvgCache,
+    max_len_input: String,
 
     // Window geometry persistence
     window_frames_seen: u32,
@@ -265,6 +266,7 @@ pub struct TruePeaksApp {
 impl TruePeaksApp {
     pub fn new(cc: &eframe::CreationContext<'_>, config: AppConfig) -> Self {
         configure_theme_styles(&cc.egui_ctx, config.theme);
+        let max_len_input = config.log_filenames.max_length.to_string();
         Self {
             config,
             active_view: ActiveView::Analyzer,
@@ -287,6 +289,7 @@ impl TruePeaksApp {
             about_tab: AboutTab::Overview,
             about_url_copied_at: None,
             math_svg_cache: MathSvgCache::default(),
+            max_len_input,
             window_frames_seen: 0,
             window_save_pending_at: None,
         }
@@ -1852,6 +1855,7 @@ impl TruePeaksApp {
                     .clicked()
                 {
                     self.config = AppConfig::default();
+                    self.max_len_input = self.config.log_filenames.max_length.to_string();
                     ctx.set_theme(to_egui_theme_preference(self.config.theme));
                     self.reset_window_geometry(ctx);
                     config_changed = true;
@@ -2728,28 +2732,59 @@ impl TruePeaksApp {
                         pal,
                         "Maximum Filename Characters",
                         "Character limit applied when filename restriction is enabled (suggested: 64)",
-                        "Type or drag to set the maximum number of characters shown per audio track filename inside logs (8–255).",
+                        "Drag the slider or type any character limit between 8 and 255.",
                         |ui| {
                             ui.horizontal(|ui| {
-                                if self.config.log_filenames.max_length != 64
-                                    && ui
-                                        .button("64")
-                                        .on_hover_text("Reset character limit to suggested default (64)")
-                                        .clicked()
+                                ui.spacing_mut().slider_width = 140.0;
+                                if ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut self.config.log_filenames.max_length,
+                                            8..=255,
+                                        )
+                                        .show_value(false),
+                                    )
+                                    .on_hover_text("Slide to set maximum character count (8–255)")
+                                    .changed()
                                 {
-                                    self.config.log_filenames.max_length = 64;
+                                    self.max_len_input =
+                                        self.config.log_filenames.max_length.to_string();
                                     changed = true;
                                 }
-                                changed |= ui
+
+                                let te_resp = ui
                                     .add(
-                                        egui::DragValue::new(
-                                            &mut self.config.log_filenames.max_length,
-                                        )
-                                        .range(8..=255)
-                                        .suffix(" chars")
-                                        .speed(0.5),
+                                        egui::TextEdit::singleline(&mut self.max_len_input)
+                                            .desired_width(46.0)
+                                            .horizontal_align(Align::Center),
                                     )
-                                    .changed();
+                                    .on_hover_text("Type a character limit (8–255)");
+
+                                if te_resp.changed() {
+                                    self.max_len_input.retain(|c| c.is_ascii_digit());
+                                    if let Ok(val) = self.max_len_input.parse::<usize>() {
+                                        if (8..=255).contains(&val)
+                                            && self.config.log_filenames.max_length != val
+                                        {
+                                            self.config.log_filenames.max_length = val;
+                                            changed = true;
+                                        }
+                                    }
+                                }
+
+                                let enter_pressed =
+                                    te_resp.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                                if te_resp.lost_focus() || enter_pressed {
+                                    changed |= commit_max_len_input(
+                                        &mut self.max_len_input,
+                                        &mut self.config.log_filenames.max_length,
+                                    );
+                                    if enter_pressed {
+                                        te_resp.surrender_focus();
+                                    }
+                                }
+
+                                ui.label(RichText::new("chars").size(12.5).color(pal.text_muted));
                             });
                         },
                     );
@@ -3187,6 +3222,16 @@ fn pill_toggle_tip(
     } else {
         false
     }
+}
+
+/// Commits the text input for max filename characters on blur/Enter, clamping into `8..=255`.
+pub(crate) fn commit_max_len_input(input: &mut String, current: &mut usize) -> bool {
+    let prev = *current;
+    if let Ok(parsed) = input.trim().parse::<usize>() {
+        *current = parsed.clamp(8, 255);
+    }
+    *input = current.to_string();
+    *current != prev
 }
 
 impl eframe::App for TruePeaksApp {

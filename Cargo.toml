@@ -1,6 +1,6 @@
 [package]
 name = "truepeaks"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "High-performance pure-Rust audio loudness and PMF dynamic range analyzer"
 license = "MIT"
