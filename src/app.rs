@@ -1,5 +1,5 @@
 use crate::config::{
-    AppConfig, CharsetMode, FolderColumnsConfig, FolderLogStyle, LineEndingMode,
+    AppConfig, CharsetMode, FolderColumnId, FolderColumnsConfig, FolderLogStyle, LineEndingMode,
     SingleFileRowsConfig, SurroundFolderMode, ThemeMode, DEFAULT_WINDOW_HEIGHT,
     DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
 };
@@ -756,13 +756,17 @@ impl TruePeaksApp {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.active_view != ActiveView::Analyzer {
-                            if ui
-                                .add(
-                                    primary_button("← Back to Analyzer", true, pal)
-                                        .min_size(Vec2::new(0.0, 28.0)),
-                                )
-                                .on_hover_text("Return to the analyzer view (Esc)")
-                                .clicked()
+                            if back_button(
+                                ui,
+                                ctx,
+                                &mut self.math_svg_cache,
+                                "Back to Analyzer",
+                                true,
+                                28.0,
+                                pal,
+                            )
+                            .on_hover_text("Return to the analyzer view (Esc)")
+                            .clicked()
                             {
                                 self.active_view = ActiveView::Analyzer;
                             }
@@ -1594,12 +1598,16 @@ impl TruePeaksApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(
-                        primary_button("← Back to Analyzer", true, pal)
-                            .min_size(Vec2::new(0.0, 30.0)),
-                    )
-                    .clicked()
+                if back_button(
+                    ui,
+                    ctx,
+                    &mut self.math_svg_cache,
+                    "Back to Analyzer",
+                    true,
+                    30.0,
+                    pal,
+                )
+                .clicked()
                 {
                     self.active_view = ActiveView::Analyzer;
                 }
@@ -1742,23 +1750,31 @@ impl TruePeaksApp {
 
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("← Overview").size(13.5))
-                        .min_size(Vec2::new(0.0, 30.0)),
-                )
-                .clicked()
+            if back_button(
+                ui,
+                ctx,
+                &mut self.math_svg_cache,
+                "Overview",
+                false,
+                30.0,
+                pal,
+            )
+            .clicked()
             {
                 self.about_tab = AboutTab::Overview;
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .add(
-                        primary_button("← Back to Analyzer", true, pal)
-                            .min_size(Vec2::new(0.0, 30.0)),
-                    )
-                    .clicked()
+                if back_button(
+                    ui,
+                    ctx,
+                    &mut self.math_svg_cache,
+                    "Back to Analyzer",
+                    true,
+                    30.0,
+                    pal,
+                )
+                .clicked()
                 {
                     self.active_view = ActiveView::Analyzer;
                 }
@@ -1895,7 +1911,8 @@ impl TruePeaksApp {
                                     config_changed |= self.render_settings_appearance(ui, ctx, pal);
                                 }
                                 SettingsSection::FolderLogs => {
-                                    config_changed |= self.render_settings_folder_logs(ui, pal);
+                                    config_changed |=
+                                        self.render_settings_folder_logs(ui, ctx, pal);
                                 }
                                 SettingsSection::SingleLogs => {
                                     config_changed |= self.render_settings_single_logs(ui, pal);
@@ -2036,7 +2053,12 @@ impl TruePeaksApp {
         changed
     }
 
-    fn render_settings_folder_logs(&mut self, ui: &mut egui::Ui, pal: &Palette) -> bool {
+    fn render_settings_folder_logs(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        pal: &Palette,
+    ) -> bool {
         let mut changed = false;
         settings_section_header(
             ui,
@@ -2072,8 +2094,11 @@ impl TruePeaksApp {
                         style.description(),
                         tooltip,
                     ) {
-                        self.config.folder_log_style = style;
-                        changed = true;
+                        if self.config.folder_log_style != style {
+                            self.config.folder_log_style = style;
+                            self.config.folder_columns = FolderColumnsConfig::for_style(style);
+                            changed = true;
+                        }
                     }
                     ui.add_space(4.0);
                 }
@@ -2112,22 +2137,38 @@ impl TruePeaksApp {
         );
 
         ui.add_space(12.0);
-        if self.config.folder_log_style == FolderLogStyle::TruePeaksTable {
-            let (active_cnt, total_cnt) = self.config.folder_columns.active_count();
-            settings_card(
-                ui,
-                pal,
-                "Summary Table Columns",
-                "Hover any option for exact standard and DSP details.",
-                |ui| {
+        let (active_cnt, total_cnt) = self.config.folder_columns.active_count();
+        let current_style = self.config.folder_log_style;
+        settings_card(
+            ui,
+            pal,
+            "Summary Table Columns & Order",
+            "Select which fields appear in the folder log and arrange their left-to-right column order (applies to all 3 folder log styles).",
+            |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Presets:").strong().color(pal.text_muted));
                     if ui
                         .button("Standard")
-                        .on_hover_text("Classic balanced columns: File Name, DR (PMF/L/R), Max. TPL (ITU/L/R), Integrated Loudness")
+                        .on_hover_text("TruePeaks default columns: File Name, DR (PMF/L/R), Max. TPL (ITU/L/R), Integrated Loudness")
                         .clicked()
                     {
                         self.config.folder_columns = FolderColumnsConfig::default();
+                        changed = true;
+                    }
+                    if ui
+                        .button("Classic DR")
+                        .on_hover_text("Classic foo_dr columns: DR (PMF), Max. SPPM (JOINT), RMS (JOINT), Duration, File Name")
+                        .clicked()
+                    {
+                        self.config.folder_columns = FolderColumnsConfig::classic_foo_dr();
+                        changed = true;
+                    }
+                    if ui
+                        .button("Compact Mastering")
+                        .on_hover_text("Compact Mastering columns: DR (PMF), Max. SPPM (JOINT), Max. TPL (ITU), LUFSi, Min. PSR, Duration, File Name")
+                        .clicked()
+                    {
+                        self.config.folder_columns = FolderColumnsConfig::compact_mastering();
                         changed = true;
                     }
                     if ui
@@ -2148,7 +2189,7 @@ impl TruePeaksApp {
                     }
                     if ui
                         .button("All Columns")
-                        .on_hover_text("Enable all 26 available columns")
+                        .on_hover_text("Enable all 28 available columns")
                         .clicked()
                     {
                         self.config.folder_columns = FolderColumnsConfig::all_enabled();
@@ -2169,124 +2210,38 @@ impl TruePeaksApp {
 
                 ui.label(RichText::new("Track Info & Bit Depth").strong().size(13.0));
                 ui.horizontal_wrapped(|ui| {
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "File Name",
-                        &mut cols.file_name,
-                        pal,
-                        "Source audio filename stem (leftmost table column).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "File Format",
-                        &mut cols.file_format,
-                        pal,
-                        "Audio container/codec extension (for example .flac, .wav, .mp3).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Sample Rate",
-                        &mut cols.sample_rate,
-                        pal,
-                        "Sample rate in kHz (for example 44.1k, 48k, 96k, 192k).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Word Length",
-                        &mut cols.word_length,
-                        pal,
-                        "Nominal container bit depth (for example 16 or 24 bit PCM).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Bits Used",
-                        &mut cols.bits_used,
-                        pal,
-                        "Effective active PCM resolution scanned across all samples (reveals 16-bit audio padded inside a 24-bit file).",
-                    );
+                    for col_id in [
+                        FolderColumnId::FileName,
+                        FolderColumnId::Duration,
+                        FolderColumnId::FileFormat,
+                        FolderColumnId::SampleRate,
+                        FolderColumnId::WordLength,
+                        FolderColumnId::BitsUsed,
+                    ] {
+                        changed |= col_pill_toggle(ui, cols, col_id, pal);
+                    }
                 });
 
                 ui.add_space(4.0);
                 ui.separator();
                 ui.label(RichText::new("Dynamic Range & Peaks").strong().size(13.0));
                 ui.horizontal_wrapped(|ui| {
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "DR (PMF)",
-                        &mut cols.dr_pmf,
-                        pal,
-                        "Rounded integer Pleasurize Music Foundation DR score averaged across active channels.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "DR LEFT",
-                        &mut cols.dr_left,
-                        pal,
-                        "Unrounded left-channel PMF DR (2nd-highest 3 s block peak minus top-20% RMS).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "DR RIGHT",
-                        &mut cols.dr_right,
-                        pal,
-                        "Unrounded right-channel PMF DR (2nd-highest 3 s block peak minus top-20% RMS).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. TPL (ITU)",
-                        &mut cols.max_tpl_itu,
-                        pal,
-                        "Highest 4x oversampled ITU-R BS.1770-4 True Peak across all channels (dBTP).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. TPL LEFT",
-                        &mut cols.max_tpl_left,
-                        pal,
-                        "Left-channel 4x oversampled ITU-R BS.1770-4 True Peak (dBTP).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. TPL RIGHT",
-                        &mut cols.max_tpl_right,
-                        pal,
-                        "Right-channel 4x oversampled ITU-R BS.1770-4 True Peak (dBTP).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. SPPM (JOINT)",
-                        &mut cols.max_sppm_joint,
-                        pal,
-                        "Highest raw digital Sample Peak Program level across channels without oversampling (dBFS).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. SPPM LEFT",
-                        &mut cols.max_sppm_left,
-                        pal,
-                        "Left-channel raw digital Sample Peak magnitude (dBFS).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. SPPM RIGHT",
-                        &mut cols.max_sppm_right,
-                        pal,
-                        "Right-channel raw digital Sample Peak magnitude (dBFS).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "RMS LEFT",
-                        &mut cols.rms_left,
-                        pal,
-                        "Left-channel AES17 sine-normalized RMS over 3 s PMF blocks (dBFS).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "RMS RIGHT",
-                        &mut cols.rms_right,
-                        pal,
-                        "Right-channel AES17 sine-normalized RMS over 3 s PMF blocks (dBFS).",
-                    );
+                    for col_id in [
+                        FolderColumnId::DrPmf,
+                        FolderColumnId::DrLeft,
+                        FolderColumnId::DrRight,
+                        FolderColumnId::MaxTplItu,
+                        FolderColumnId::MaxTplLeft,
+                        FolderColumnId::MaxTplRight,
+                        FolderColumnId::MaxSppmJoint,
+                        FolderColumnId::MaxSppmLeft,
+                        FolderColumnId::MaxSppmRight,
+                        FolderColumnId::RmsJoint,
+                        FolderColumnId::RmsLeft,
+                        FolderColumnId::RmsRight,
+                    ] {
+                        changed |= col_pill_toggle(ui, cols, col_id, pal);
+                    }
                 });
 
                 ui.add_space(4.0);
@@ -2297,107 +2252,216 @@ impl TruePeaksApp {
                         .size(13.0),
                 );
                 ui.horizontal_wrapped(|ui| {
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Integrated Loudness (ITU)",
-                        &mut cols.lufsi,
-                        pal,
-                        "Gated whole-track Integrated Loudness in LUFS per ITU-R BS.1770-4 / EBU R128.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "LRA (ITU)",
-                        &mut cols.lra,
-                        pal,
-                        "Loudness Range in LU measuring macro-dynamic spread across gated Short-Term windows.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. Mom. (ITU)",
-                        &mut cols.max_mom_itu,
-                        pal,
-                        "Peak continuous sample-sliding 400 ms Momentary Loudness across joint weighted channels.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. Short-Term (ITU)",
-                        &mut cols.max_short_term_itu,
-                        pal,
-                        "Peak continuous sample-sliding 3.0 s Short-Term Loudness across joint weighted channels.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. Mom. LEFT",
-                        &mut cols.max_mom_left,
-                        pal,
-                        "Left-channel continuous 400 ms Momentary peak calibrated with +3.01 dB dual-mono convention.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. Mom. RIGHT",
-                        &mut cols.max_mom_right,
-                        pal,
-                        "Right-channel continuous 400 ms Momentary peak calibrated with +3.01 dB dual-mono convention.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. Short-Term LEFT",
-                        &mut cols.max_short_term_left,
-                        pal,
-                        "Left-channel continuous 3.0 s Short-Term peak calibrated with +3.01 dB dual-mono convention.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Max. Short-Term RIGHT",
-                        &mut cols.max_short_term_right,
-                        pal,
-                        "Right-channel continuous 3.0 s Short-Term peak calibrated with +3.01 dB dual-mono convention.",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "PLR (AES)",
-                        &mut cols.plr,
-                        pal,
-                        "Peak-to-Integrated-Loudness Ratio in LU (reference peak minus LUFSi).",
-                    );
-                    changed |= pill_toggle_tip(
-                        ui,
-                        "Min. PSR (AES)",
-                        &mut cols.min_psr,
-                        pal,
-                        "Lowest continuous 3.0 s Sample-Peak-to-Short-Term-Loudness ratio (highlights over-compressed sections).",
-                    );
+                    for col_id in [
+                        FolderColumnId::Lufsi,
+                        FolderColumnId::Lra,
+                        FolderColumnId::MaxMomItu,
+                        FolderColumnId::MaxShortTermItu,
+                        FolderColumnId::MaxMomLeft,
+                        FolderColumnId::MaxMomRight,
+                        FolderColumnId::MaxShortTermLeft,
+                        FolderColumnId::MaxShortTermRight,
+                        FolderColumnId::Plr,
+                        FolderColumnId::MinPsr,
+                    ] {
+                        changed |= col_pill_toggle(ui, cols, col_id, pal);
+                    }
                 });
+
+                ui.add_space(6.0);
+                ui.separator();
+
+                let sel_key = egui::Id::new("folder_col_order_selected");
+                let dnd_key = egui::Id::new("folder_col_order_drag_col");
+                let active = cols.active_ordered();
+                let mut selected_col: Option<FolderColumnId> =
+                    ctx.data(|d| d.get_temp::<FolderColumnId>(sel_key));
+                if let Some(sc) = selected_col {
+                    if !active.contains(&sc) {
+                        selected_col = None;
+                        ctx.data_mut(|d| d.remove::<FolderColumnId>(sel_key));
+                    }
+                }
+                let selected_idx = selected_col.and_then(|sc| active.iter().position(|&c| c == sc));
+                let mut pending_move: Option<(usize, usize)> = None;
+
+                // Allow Left / Right keyboard arrows to nudge the selected column
+                if let Some(s_idx) = selected_idx {
+                    if ctx.input(|i| i.key_pressed(Key::ArrowLeft)) && s_idx > 0 {
+                        pending_move = Some((s_idx, s_idx - 1));
+                    } else if ctx.input(|i| i.key_pressed(Key::ArrowRight))
+                        && s_idx + 1 < active.len()
+                    {
+                        pending_move = Some((s_idx, s_idx + 1));
+                    }
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Column Order (Left to Right)")
+                            .strong()
+                            .size(13.0),
+                    );
+                    ui.label(
+                        RichText::new("— drag any pill, or click to select & nudge")
+                            .size(12.0)
+                            .color(pal.text_muted),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add_sized(
+                                Vec2::new(0.0, 24.0),
+                                egui::Button::new(RichText::new("Reset Order").size(12.0)),
+                            )
+                            .on_hover_text(
+                                "Restore the default column order for the selected Folder Log Style",
+                            )
+                            .clicked()
+                        {
+                            cols.reset_order_for_style(current_style);
+                            changed = true;
+                        }
+
+                        let can_right =
+                            selected_idx.map(|i| i + 1 < active.len()).unwrap_or(false);
+                        if svg_nudge_button(
+                            ui,
+                            ctx,
+                            &mut self.math_svg_cache,
+                            "forward_arrow",
+                            include_bytes!("../assets/forward_arrow.svg"),
+                            can_right,
+                            pal,
+                        )
+                        .on_hover_text("Move selected column right (Right Arrow)")
+                        .clicked()
+                        {
+                            if let Some(i) = selected_idx {
+                                pending_move = Some((i, i + 1));
+                            }
+                        }
+
+                        let can_left = selected_idx.map(|i| i > 0).unwrap_or(false);
+                        if svg_nudge_button(
+                            ui,
+                            ctx,
+                            &mut self.math_svg_cache,
+                            "back_arrow",
+                            include_bytes!("../assets/back_arrow.svg"),
+                            can_left,
+                            pal,
+                        )
+                        .on_hover_text("Move selected column left (Left Arrow)")
+                        .clicked()
+                        {
+                            if let Some(i) = selected_idx {
+                                pending_move = Some((i, i - 1));
+                            }
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+
+                Frame::none()
+                    .fill(pal.well)
+                    .rounding(Rounding::same(8.0))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
+                    .inner_margin(Margin::symmetric(10.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        if active.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "No columns enabled — style default columns will be used.",
+                                )
+                                .size(12.5)
+                                .color(pal.text_muted),
+                            );
+                        } else {
+                            let dragged_col: Option<FolderColumnId> =
+                                ctx.data(|d| d.get_temp::<FolderColumnId>(dnd_key));
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(7.0, 7.0);
+                                for (idx, &col_id) in active.iter().enumerate() {
+                                    let is_selected = selected_col == Some(col_id);
+                                    let is_dragged = dragged_col == Some(col_id);
+                                    let resp = paint_order_column_pill(
+                                        ui,
+                                        idx + 1,
+                                        col_id.short_chip_label(),
+                                        is_selected,
+                                        is_dragged,
+                                        pal,
+                                    )
+                                    .on_hover_cursor(CursorIcon::Grab)
+                                    .on_hover_text(format!(
+                                        "{}\nDrag to reorder, or click to select.",
+                                        col_id.tooltip()
+                                    ));
+
+                                    if resp.clicked() {
+                                        let next_sel = if is_selected { None } else { Some(col_id) };
+                                        ctx.data_mut(|d| {
+                                            if let Some(c) = next_sel {
+                                                d.insert_temp(sel_key, c);
+                                            } else {
+                                                d.remove::<FolderColumnId>(sel_key);
+                                            }
+                                        });
+                                    }
+
+                                    if resp.drag_started() {
+                                        ctx.data_mut(|d| {
+                                            d.insert_temp(dnd_key, col_id);
+                                            d.insert_temp(sel_key, col_id);
+                                        });
+                                    }
+
+                                    if let Some(d_col) = dragged_col {
+                                        if d_col != col_id
+                                            && ui.rect_contains_pointer(resp.rect.expand(3.0))
+                                        {
+                                            if let Some(from_i) =
+                                                active.iter().position(|&c| c == d_col)
+                                            {
+                                                pending_move = Some((from_i, idx));
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+
+                            if let Some(d_col) = dragged_col {
+                                ctx.set_cursor_icon(CursorIcon::Grabbing);
+                                if let Some(ptr) = ctx.pointer_interact_pos() {
+                                    let d_idx = active
+                                        .iter()
+                                        .position(|&c| c == d_col)
+                                        .map(|i| i + 1)
+                                        .unwrap_or(1);
+                                    paint_floating_drag_pill(
+                                        ctx,
+                                        ptr,
+                                        d_idx,
+                                        d_col.short_chip_label(),
+                                        pal,
+                                    );
+                                }
+                                if ctx.input(|i| i.pointer.any_released()) {
+                                    ctx.data_mut(|d| d.remove::<FolderColumnId>(dnd_key));
+                                }
+                            }
+
+                            if let Some((from_i, to_i)) = pending_move {
+                                if cols.move_active_column(from_i, to_i) {
+                                    changed = true;
+                                }
+                            }
+                        }
+                    });
             },
         );
-        } else {
-            settings_card(
-                ui,
-                pal,
-                "Summary Table Columns",
-                "Column selection applies to the TruePeaks Table (Default) format.",
-                |ui| {
-                    let note = match self.config.folder_log_style {
-                        FolderLogStyle::ClassicFooDr => {
-                            "Classic DR (foo_dr Style) uses a fixed column layout (DR, Sample Peak, RMS, Duration, Track) plus codec metadata at the bottom."
-                        }
-                        FolderLogStyle::CompactMastering => {
-                            "Compact Mastering uses a fixed executive layout (DR, Peak dB, TPL dBTP, LUFSi, PSR, Time, Track) with album summary stats above the table."
-                        }
-                        FolderLogStyle::TruePeaksTable => "",
-                    };
-                    ui.label(RichText::new(note).size(13.0).color(pal.text_muted));
-                    ui.add_space(8.0);
-                    if ui
-                        .button("Switch to TruePeaks Table to Customize Columns")
-                        .clicked()
-                    {
-                        self.config.folder_log_style = FolderLogStyle::TruePeaksTable;
-                        changed = true;
-                    }
-                },
-            );
-        }
 
         ui.add_space(12.0);
         settings_card(
@@ -3182,6 +3246,311 @@ fn reveal_in_file_manager(path: &Path) {
             .unwrap_or(clean);
         let _ = std::process::Command::new("xdg-open").arg(target).spawn();
     }
+}
+
+fn svg_nudge_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
+    icon_id: &'static str,
+    svg_bytes: &'static [u8],
+    enabled: bool,
+    pal: &Palette,
+) -> egui::Response {
+    let size = Vec2::new(26.0, 24.0);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let visuals = ui.style().interact(&resp);
+    let fill = if !enabled {
+        pal.surface_alt
+    } else if resp.is_pointer_button_down_on() {
+        pal.accent
+    } else if resp.hovered() {
+        Color32::from_rgba_unmultiplied(
+            pal.accent.r(),
+            pal.accent.g(),
+            pal.accent.b(),
+            if pal.dark { 42 } else { 24 },
+        )
+    } else {
+        visuals.bg_fill
+    };
+    let stroke = if enabled && resp.hovered() {
+        Stroke::new(1.0_f32, pal.accent)
+    } else {
+        Stroke::new(1.0_f32, pal.border)
+    };
+    let fg = if !enabled {
+        Color32::from_rgba_unmultiplied(
+            pal.text_muted.r(),
+            pal.text_muted.g(),
+            pal.text_muted.b(),
+            95,
+        )
+    } else if resp.is_pointer_button_down_on() {
+        Color32::WHITE
+    } else {
+        pal.text_primary
+    };
+
+    ui.painter().rect(rect, Rounding::same(5.0), fill, stroke);
+
+    let icon_sz = 13.0_f32;
+    let ppp = ctx.pixels_per_point().max(1.0);
+    let icon_min = egui::pos2(
+        ((rect.center().x - icon_sz * 0.5) * ppp).round() / ppp,
+        ((rect.center().y - icon_sz * 0.5) * ppp).round() / ppp,
+    );
+    let icon_rect = egui::Rect::from_min_size(icon_min, Vec2::splat(icon_sz));
+    if let Some(tex) = cache.ui_icon_texture(ctx, icon_id, svg_bytes, icon_sz, ppp) {
+        ui.painter().image(
+            tex.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            fg,
+        );
+    }
+
+    if enabled {
+        resp.on_hover_cursor(CursorIcon::PointingHand)
+    } else {
+        resp
+    }
+}
+
+fn paint_order_column_pill(
+    ui: &mut egui::Ui,
+    step_num: usize,
+    label: &str,
+    is_selected: bool,
+    is_dragged: bool,
+    pal: &Palette,
+) -> egui::Response {
+    let num_str = step_num.to_string();
+    let num_galley = ui.painter().layout_no_wrap(
+        num_str,
+        FontId::monospace(11.0),
+        if is_selected || is_dragged {
+            Color32::WHITE
+        } else {
+            pal.text_muted
+        },
+    );
+    let lbl_galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        FontId::proportional(12.5),
+        pal.text_primary,
+    );
+
+    let badge_w = (num_galley.size().x + 9.0).max(18.0);
+    let badge_h = 16.0_f32;
+    let grip_w = 8.0_f32;
+    let pad_l = 8.0_f32;
+    let pad_r = 10.0_f32;
+    let total_w = pad_l + grip_w + 5.0 + badge_w + 6.0 + lbl_galley.size().x + pad_r;
+    let total_h = 28.0_f32;
+
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(total_w, total_h), Sense::click_and_drag());
+    let hovered = resp.hovered();
+
+    let fill = if is_dragged {
+        Color32::from_rgba_unmultiplied(
+            pal.accent.r(),
+            pal.accent.g(),
+            pal.accent.b(),
+            if pal.dark { 58 } else { 36 },
+        )
+    } else if is_selected {
+        Color32::from_rgba_unmultiplied(
+            pal.accent.r(),
+            pal.accent.g(),
+            pal.accent.b(),
+            if pal.dark { 38 } else { 22 },
+        )
+    } else if hovered {
+        pal.surface
+    } else {
+        pal.surface_alt
+    };
+
+    let stroke = if is_dragged || is_selected {
+        Stroke::new(1.5_f32, pal.accent)
+    } else if hovered {
+        Stroke::new(1.0_f32, pal.accent_hover)
+    } else {
+        Stroke::new(1.0_f32, pal.border)
+    };
+
+    let painter = ui.painter();
+    painter.rect(rect, Rounding::same(6.0), fill, stroke);
+
+    // Paint subtle 2x3 drag-grip dots on the left
+    let dot_color = if is_selected || is_dragged || hovered {
+        pal.accent
+    } else {
+        Color32::from_rgba_unmultiplied(
+            pal.text_muted.r(),
+            pal.text_muted.g(),
+            pal.text_muted.b(),
+            135,
+        )
+    };
+    let grip_x0 = rect.left() + pad_l + 1.5;
+    let cy = rect.center().y;
+    for col in 0..2 {
+        for row in -1..=1 {
+            let pt = egui::pos2(grip_x0 + (col as f32) * 3.8, cy + (row as f32) * 4.2);
+            painter.circle_filled(pt, 1.15, dot_color);
+        }
+    }
+
+    // Paint step number badge
+    let badge_x = rect.left() + pad_l + grip_w + 5.0;
+    let badge_rect = egui::Rect::from_min_size(
+        egui::pos2(badge_x, cy - badge_h * 0.5),
+        Vec2::new(badge_w, badge_h),
+    );
+    let badge_fill = if is_selected || is_dragged {
+        pal.accent
+    } else {
+        pal.well
+    };
+    painter.rect_filled(badge_rect, Rounding::same(4.0), badge_fill);
+    painter.galley(
+        egui::pos2(
+            badge_rect.center().x - num_galley.size().x * 0.5,
+            badge_rect.center().y - num_galley.size().y * 0.5,
+        ),
+        num_galley,
+        Color32::WHITE,
+    );
+
+    // Paint column label
+    let lbl_x = badge_rect.right() + 6.0;
+    painter.galley(
+        egui::pos2(lbl_x, cy - lbl_galley.size().y * 0.5),
+        lbl_galley,
+        pal.text_primary,
+    );
+
+    resp
+}
+
+fn paint_floating_drag_pill(
+    ctx: &egui::Context,
+    pointer_pos: egui::Pos2,
+    step_num: usize,
+    label: &str,
+    pal: &Palette,
+) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("folder_col_drag_ghost"),
+    ));
+    let text = format!("{}. {}", step_num, label);
+    let galley = painter.layout_no_wrap(text, FontId::proportional(12.5), Color32::WHITE);
+    let size = Vec2::new(galley.size().x + 22.0, 28.0);
+    let rect = egui::Rect::from_center_size(pointer_pos + Vec2::new(0.0, -18.0), size);
+    painter.rect(
+        rect,
+        Rounding::same(6.0),
+        pal.accent,
+        Stroke::new(1.5_f32, Color32::WHITE),
+    );
+    painter.galley(
+        egui::pos2(
+            rect.center().x - galley.size().x * 0.5,
+            rect.center().y - galley.size().y * 0.5,
+        ),
+        galley,
+        Color32::WHITE,
+    );
+}
+
+fn col_pill_toggle(
+    ui: &mut egui::Ui,
+    cols: &mut FolderColumnsConfig,
+    col_id: FolderColumnId,
+    pal: &Palette,
+) -> bool {
+    let mut active = cols.is_enabled(col_id);
+    if pill_toggle_tip(ui, col_id.label(), &mut active, pal, col_id.tooltip()) {
+        cols.set_enabled(col_id, active);
+        true
+    } else {
+        false
+    }
+}
+
+fn back_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
+    label: &str,
+    is_primary: bool,
+    min_height: f32,
+    pal: &Palette,
+) -> egui::Response {
+    let font_id = FontId::proportional(13.5);
+    let text_color_preview = if is_primary {
+        Color32::WHITE
+    } else {
+        pal.text_primary
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font_id.clone(), text_color_preview);
+    let icon_sz = 14.0_f32;
+    let gap = 6.0_f32;
+    let pad_x = 11.0_f32;
+    let width = pad_x * 2.0 + icon_sz + gap + galley.size().x;
+    let height = min_height.max(galley.size().y + 10.0);
+
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    let (fill, stroke, fg) = if is_primary {
+        let f = if resp.is_pointer_button_down_on() {
+            pal.accent
+        } else if resp.hovered() {
+            pal.accent_hover
+        } else {
+            pal.accent
+        };
+        (f, Stroke::new(1.0_f32, f), Color32::WHITE)
+    } else {
+        let visuals = ui.style().interact(&resp);
+        (visuals.bg_fill, visuals.bg_stroke, pal.text_primary)
+    };
+
+    ui.painter().rect(rect, Rounding::same(6.0), fill, stroke);
+
+    let ppp = ctx.pixels_per_point().max(1.0);
+    let icon_min = egui::pos2(
+        ((rect.left() + pad_x) * ppp).round() / ppp,
+        ((rect.center().y - icon_sz * 0.5) * ppp).round() / ppp,
+    );
+    let icon_rect = egui::Rect::from_min_size(icon_min, Vec2::splat(icon_sz));
+    if let Some(tex) = cache.ui_icon_texture(
+        ctx,
+        "back_arrow",
+        include_bytes!("../assets/back_arrow.svg"),
+        icon_sz,
+        ppp,
+    ) {
+        ui.painter().image(
+            tex.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            fg,
+        );
+    }
+
+    let text_pos = egui::pos2(
+        icon_rect.right() + gap,
+        rect.center().y - galley.size().y * 0.5,
+    );
+    ui.painter().galley(text_pos, galley, fg);
+
+    resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 fn pill_toggle_tip(

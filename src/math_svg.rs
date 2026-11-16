@@ -33,6 +33,40 @@ impl MathSvgCache {
 
         self.textures.get(&key)
     }
+
+    /// Returns a GPU texture for an inline UI SVG icon of logical size `size_pt` at `pixels_per_point`.
+    pub fn ui_icon_texture(
+        &mut self,
+        ctx: &Context,
+        id: &'static str,
+        svg_bytes: &[u8],
+        size_pt: f32,
+        pixels_per_point: f32,
+    ) -> Option<&TextureHandle> {
+        let px = (size_pt * pixels_per_point.clamp(1.0, 4.0)).round().clamp(8.0, 256.0) as u32;
+        let key = (id, px);
+
+        if !self.textures.contains_key(&key) {
+            let opts = usvg::Options::default();
+            let tree = usvg::Tree::from_data(svg_bytes, &opts).ok()?;
+            let svg_size = tree.size();
+            let scale = ((px as f32) / svg_size.width().max(1.0))
+                .min((px as f32) / svg_size.height().max(1.0));
+            let mut pixmap = tiny_skia::Pixmap::new(px, px)?;
+            resvg::render(
+                &tree,
+                tiny_skia::Transform::from_scale(scale, scale),
+                &mut pixmap.as_mut(),
+            );
+            let image =
+                ColorImage::from_rgba_premultiplied([px as usize, px as usize], &pixmap.take());
+            let tex_name = format!("ui_svg_{}_{}", id, px);
+            let handle = ctx.load_texture(tex_name, image, TextureOptions::NEAREST);
+            self.textures.insert(key, handle);
+        }
+
+        self.textures.get(&key)
+    }
 }
 
 /// Renders a pre-baked `MathSvgAsset` in `ui` snapped 1:1 to physical pixels and tinted to `text_color`.
@@ -89,4 +123,40 @@ pub fn rasterize_svg_rgba(
     );
 
     Ok((px_w, px_h, pixmap.take()))
+}
+
+/// Rasterizes a standalone SVG icon into unpremultiplied RGBA [`egui::IconData`].
+pub fn rasterize_icon_svg(svg_bytes: &[u8], target_px: u32) -> Result<egui::IconData, String> {
+    let opts = usvg::Options::default();
+    let tree =
+        usvg::Tree::from_data(svg_bytes, &opts).map_err(|e| format!("failed to parse icon SVG: {e}"))?;
+
+    let svg_size = tree.size();
+    let px = target_px.clamp(16, 1024);
+    let scale_x = (px as f32) / svg_size.width().max(1.0);
+    let scale_y = (px as f32) / svg_size.height().max(1.0);
+    let scale = scale_x.min(scale_y);
+
+    let mut pixmap =
+        tiny_skia::Pixmap::new(px, px).ok_or_else(|| format!("invalid icon pixmap {px}x{px}"))?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    let rgba: Vec<u8> = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect();
+
+    Ok(egui::IconData {
+        rgba,
+        width: px,
+        height: px,
+    })
 }

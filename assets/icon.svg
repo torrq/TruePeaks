@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Dark squircle background and subtle border -->
+  <rect x="24" y="24" width="464" height="464" rx="110" ry="110" fill="#0F1319" stroke="#3F4552" stroke-width="10"/>
+
+  <!-- 5 two-tone pill bars: sky-cyan peak cap (#5EC4FE) + royal-blue body (#3189FE) -->
+  <!-- Bar 1 (leftmost) -->
+  <rect x="74" y="258" width="52" height="160" rx="26" ry="26" fill="#5EC4FE"/>
+  <path d="M 74 298 H 126 V 392 C 126 406.36 114.36 418 100 418 C 85.64 418 74 406.36 74 392 Z" fill="#3189FE"/>
+
+  <!-- Bar 2 (mid-left) -->
+  <rect x="152" y="176" width="52" height="242" rx="26" ry="26" fill="#5EC4FE"/>
+  <path d="M 152 218 H 204 V 392 C 204 406.36 192.36 418 178 418 C 163.64 418 152 406.36 152 392 Z" fill="#3189FE"/>
+
+  <!-- Bar 3 (center peak) -->
+  <rect x="230" y="92" width="52" height="326" rx="26" ry="26" fill="#5EC4FE"/>
+  <path d="M 230 144 H 282 V 392 C 282 406.36 270.36 418 256 418 C 241.64 418 230 406.36 230 392 Z" fill="#3189FE"/>
+
+  <!-- Bar 4 (mid-right) -->
+  <rect x="308" y="176" width="52" height="242" rx="26" ry="26" fill="#5EC4FE"/>
+  <path d="M 308 218 H 360 V 392 C 360 406.36 348.36 418 334 418 C 319.64 418 308 406.36 308 392 Z" fill="#3189FE"/>
+
+  <!-- Bar 5 (rightmost) -->
+  <rect x="386" y="258" width="52" height="160" rx="26" ry="26" fill="#5EC4FE"/>
+  <path d="M 386 298 H 438 V 392 C 438 406.36 426.36 418 412 418 C 397.64 418 386 406.36 386 392 Z" fill="#3189FE"/>
+
+  <!-- Reconstructed true-peak envelope curve -->
+  <path d="M 32 348 C 148 348 196 144 256 144 C 316 144 364 348 480 348" fill="none" stroke="#E6F7FF" stroke-width="14" stroke-linecap="round"/>
+</svg>

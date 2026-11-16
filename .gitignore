@@ -1,3 +1,4 @@
 /target
 scratch/
+__pycache__/
 truepeaks_audio_analyzer_specification_plan.md

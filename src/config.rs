@@ -105,13 +105,13 @@ impl FolderLogStyle {
     pub fn description(&self) -> &'static str {
         match self {
             FolderLogStyle::TruePeaksTable => {
-                "Customizable pipe-delimited multi-column spreadsheet table."
+                "Pipe-delimited multi-column spreadsheet table with customizable column selection and order."
             }
             FolderLogStyle::ClassicFooDr => {
-                "Classic DR / Peak / RMS / Duration layout with album codec summary (omits app/date header)."
+                "Classic borderless DR / Peak / RMS / Duration layout with album codec summary and customizable columns."
             }
             FolderLogStyle::CompactMastering => {
-                "Concise album summary header with tight left-aligned DR, Peak, TPL, LUFSi, PSR, Time & Track."
+                "Concise album summary header with tight space-aligned mastering columns and customizable fields."
             }
         }
     }
@@ -122,6 +122,176 @@ impl FolderLogStyle {
             FolderLogStyle::ClassicFooDr,
             FolderLogStyle::CompactMastering,
         ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FolderColumnId {
+    // Group 1: Info
+    FileName,
+    Duration,
+    FileFormat,
+    SampleRate,
+    WordLength,
+    BitsUsed,
+
+    // Group 2: DR
+    DrPmf,
+    DrLeft,
+    DrRight,
+
+    // Group 3: True Peak Level
+    MaxTplItu,
+    MaxTplLeft,
+    MaxTplRight,
+
+    // Group 4: LUFS
+    Lufsi,
+    Lra,
+    MaxMomItu,
+    MaxShortTermItu,
+
+    // Group 5: Channel Specific LUFS
+    MaxMomLeft,
+    MaxMomRight,
+    MaxShortTermLeft,
+    MaxShortTermRight,
+
+    // Group 6: Old Skool
+    MaxSppmJoint,
+    MaxSppmLeft,
+    MaxSppmRight,
+    RmsJoint,
+    RmsLeft,
+    RmsRight,
+
+    // Group 7: Ratios
+    Plr,
+    MinPsr,
+}
+
+impl FolderColumnId {
+    pub const ALL: [FolderColumnId; 28] = [
+        FolderColumnId::FileName,
+        FolderColumnId::Duration,
+        FolderColumnId::FileFormat,
+        FolderColumnId::SampleRate,
+        FolderColumnId::WordLength,
+        FolderColumnId::BitsUsed,
+        FolderColumnId::DrPmf,
+        FolderColumnId::DrLeft,
+        FolderColumnId::DrRight,
+        FolderColumnId::MaxTplItu,
+        FolderColumnId::MaxTplLeft,
+        FolderColumnId::MaxTplRight,
+        FolderColumnId::Lufsi,
+        FolderColumnId::Lra,
+        FolderColumnId::MaxMomItu,
+        FolderColumnId::MaxShortTermItu,
+        FolderColumnId::MaxMomLeft,
+        FolderColumnId::MaxMomRight,
+        FolderColumnId::MaxShortTermLeft,
+        FolderColumnId::MaxShortTermRight,
+        FolderColumnId::MaxSppmJoint,
+        FolderColumnId::MaxSppmLeft,
+        FolderColumnId::MaxSppmRight,
+        FolderColumnId::RmsJoint,
+        FolderColumnId::RmsLeft,
+        FolderColumnId::RmsRight,
+        FolderColumnId::Plr,
+        FolderColumnId::MinPsr,
+    ];
+
+    pub fn default_order() -> Vec<FolderColumnId> {
+        Self::ALL.to_vec()
+    }
+
+    pub fn order_with_front(front: &[FolderColumnId]) -> Vec<FolderColumnId> {
+        let mut out = Vec::with_capacity(Self::ALL.len());
+        for &c in front {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        for c in Self::ALL {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FolderColumnId::FileName => "File Name",
+            FolderColumnId::Duration => "Duration",
+            FolderColumnId::FileFormat => "File Format",
+            FolderColumnId::SampleRate => "Sample Rate",
+            FolderColumnId::WordLength => "Word Length",
+            FolderColumnId::BitsUsed => "Bits Used",
+            FolderColumnId::DrPmf => "DR (PMF)",
+            FolderColumnId::DrLeft => "DR LEFT",
+            FolderColumnId::DrRight => "DR RIGHT",
+            FolderColumnId::MaxTplItu => "Max. TPL (ITU)",
+            FolderColumnId::MaxTplLeft => "Max. TPL LEFT",
+            FolderColumnId::MaxTplRight => "Max. TPL RIGHT",
+            FolderColumnId::Lufsi => "Integrated Loudness (ITU)",
+            FolderColumnId::Lra => "LRA (ITU)",
+            FolderColumnId::MaxMomItu => "Max. Mom. (ITU)",
+            FolderColumnId::MaxShortTermItu => "Max. Short-Term (ITU)",
+            FolderColumnId::MaxMomLeft => "Max. Mom. LEFT",
+            FolderColumnId::MaxMomRight => "Max. Mom. RIGHT",
+            FolderColumnId::MaxShortTermLeft => "Max. Short-Term LEFT",
+            FolderColumnId::MaxShortTermRight => "Max. Short-Term RIGHT",
+            FolderColumnId::MaxSppmJoint => "Max. SPPM (JOINT)",
+            FolderColumnId::MaxSppmLeft => "Max. SPPM LEFT",
+            FolderColumnId::MaxSppmRight => "Max. SPPM RIGHT",
+            FolderColumnId::RmsJoint => "RMS (JOINT)",
+            FolderColumnId::RmsLeft => "RMS LEFT",
+            FolderColumnId::RmsRight => "RMS RIGHT",
+            FolderColumnId::Plr => "PLR (AES)",
+            FolderColumnId::MinPsr => "Min. PSR (AES)",
+        }
+    }
+
+    pub fn short_chip_label(self) -> &'static str {
+        match self {
+            FolderColumnId::Lufsi => "LUFSi (ITU)",
+            other => other.label(),
+        }
+    }
+
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            FolderColumnId::FileName => "Source audio filename stem.",
+            FolderColumnId::Duration => "Track duration formatted as M:SS (or H:MM:SS).",
+            FolderColumnId::FileFormat => "Audio container/codec extension (for example .flac, .wav, .mp3).",
+            FolderColumnId::SampleRate => "Sample rate in kHz (for example 44.1k, 48k, 96k, 192k).",
+            FolderColumnId::WordLength => "Nominal container bit depth (for example 16 or 24 bit PCM).",
+            FolderColumnId::BitsUsed => "Effective active PCM resolution scanned across all samples (reveals 16-bit audio padded inside a 24-bit file).",
+            FolderColumnId::DrPmf => "Rounded integer Pleasurize Music Foundation DR score averaged across active channels.",
+            FolderColumnId::DrLeft => "Unrounded left-channel PMF DR (2nd-highest 3 s block peak minus top-20% RMS).",
+            FolderColumnId::DrRight => "Unrounded right-channel PMF DR (2nd-highest 3 s block peak minus top-20% RMS).",
+            FolderColumnId::MaxTplItu => "Highest 4x oversampled ITU-R BS.1770-4 True Peak across all channels (dBTP).",
+            FolderColumnId::MaxTplLeft => "Left-channel 4x oversampled ITU-R BS.1770-4 True Peak (dBTP).",
+            FolderColumnId::MaxTplRight => "Right-channel 4x oversampled ITU-R BS.1770-4 True Peak (dBTP).",
+            FolderColumnId::Lufsi => "Gated whole-track Integrated Loudness in LUFS per ITU-R BS.1770-4 / EBU R128.",
+            FolderColumnId::Lra => "Loudness Range in LU measuring macro-dynamic spread across gated Short-Term windows.",
+            FolderColumnId::MaxMomItu => "Peak continuous sample-sliding 400 ms Momentary Loudness across joint weighted channels.",
+            FolderColumnId::MaxShortTermItu => "Peak continuous sample-sliding 3.0 s Short-Term Loudness across joint weighted channels.",
+            FolderColumnId::MaxMomLeft => "Left-channel continuous 400 ms Momentary peak calibrated with +3.01 dB dual-mono convention.",
+            FolderColumnId::MaxMomRight => "Right-channel continuous 400 ms Momentary peak calibrated with +3.01 dB dual-mono convention.",
+            FolderColumnId::MaxShortTermLeft => "Left-channel continuous 3.0 s Short-Term peak calibrated with +3.01 dB dual-mono convention.",
+            FolderColumnId::MaxShortTermRight => "Right-channel continuous 3.0 s Short-Term peak calibrated with +3.01 dB dual-mono convention.",
+            FolderColumnId::MaxSppmJoint => "Highest raw digital Sample Peak Program level across channels without oversampling (dBFS).",
+            FolderColumnId::MaxSppmLeft => "Left-channel raw digital Sample Peak magnitude (dBFS).",
+            FolderColumnId::MaxSppmRight => "Right-channel raw digital Sample Peak magnitude (dBFS).",
+            FolderColumnId::RmsJoint => "Combined multi-channel AES17 sine-normalized RMS power level (dBFS).",
+            FolderColumnId::RmsLeft => "Left-channel AES17 sine-normalized RMS over 3 s PMF blocks (dBFS).",
+            FolderColumnId::RmsRight => "Right-channel AES17 sine-normalized RMS over 3 s PMF blocks (dBFS).",
+            FolderColumnId::Plr => "Peak-to-Integrated-Loudness Ratio in LU (reference peak minus LUFSi).",
+            FolderColumnId::MinPsr => "Lowest continuous 3.0 s Sample-Peak-to-Short-Term-Loudness ratio (highlights over-compressed sections).",
+        }
     }
 }
 
@@ -165,6 +335,7 @@ impl ThemeMode {
 pub struct FolderColumnsConfig {
     // Group 1: Info
     pub file_name: bool,
+    pub duration: bool,
     pub file_format: bool,
     pub sample_rate: bool,
     pub word_length: bool,
@@ -196,18 +367,23 @@ pub struct FolderColumnsConfig {
     pub max_sppm_joint: bool,
     pub max_sppm_left: bool,
     pub max_sppm_right: bool,
+    pub rms_joint: bool,
     pub rms_left: bool,
     pub rms_right: bool,
 
     // Group 7: Ratios
     pub plr: bool,
     pub min_psr: bool,
+
+    #[serde(default = "FolderColumnId::default_order")]
+    pub column_order: Vec<FolderColumnId>,
 }
 
 impl Default for FolderColumnsConfig {
     fn default() -> Self {
         Self {
             file_name: true,
+            duration: false,
             file_format: false,
             sample_rate: false,
             word_length: false,
@@ -234,16 +410,86 @@ impl Default for FolderColumnsConfig {
             max_sppm_joint: false,
             max_sppm_left: false,
             max_sppm_right: false,
+            rms_joint: false,
             rms_left: false,
             rms_right: false,
 
             plr: false,
             min_psr: false,
+
+            column_order: FolderColumnId::default_order(),
         }
     }
 }
 
 impl FolderColumnsConfig {
+    pub fn empty() -> Self {
+        Self {
+            file_name: false,
+            dr_pmf: false,
+            dr_left: false,
+            dr_right: false,
+            max_tpl_itu: false,
+            max_tpl_left: false,
+            max_tpl_right: false,
+            lufsi: false,
+            ..Self::default()
+        }
+    }
+
+    /// Default column selection and ordering for a given [`FolderLogStyle`].
+    pub fn for_style(style: FolderLogStyle) -> Self {
+        match style {
+            FolderLogStyle::TruePeaksTable => Self::default(),
+            FolderLogStyle::ClassicFooDr => Self::classic_foo_dr(),
+            FolderLogStyle::CompactMastering => Self::compact_mastering(),
+        }
+    }
+
+    /// Classic `foo_dr` column preset: `DR (PMF)`, `Max. SPPM`, `RMS`, `Duration`, `File Name`.
+    pub fn classic_foo_dr() -> Self {
+        let front = [
+            FolderColumnId::DrPmf,
+            FolderColumnId::MaxSppmJoint,
+            FolderColumnId::RmsJoint,
+            FolderColumnId::Duration,
+            FolderColumnId::FileName,
+        ];
+        Self {
+            dr_pmf: true,
+            max_sppm_joint: true,
+            rms_joint: true,
+            duration: true,
+            file_name: true,
+            column_order: FolderColumnId::order_with_front(&front),
+            ..Self::empty()
+        }
+    }
+
+    /// Compact Mastering column preset: `DR (PMF)`, `Max. SPPM`, `Max. TPL`, `LUFSi`, `Min. PSR`, `Duration`, `File Name`.
+    pub fn compact_mastering() -> Self {
+        let front = [
+            FolderColumnId::DrPmf,
+            FolderColumnId::MaxSppmJoint,
+            FolderColumnId::MaxTplItu,
+            FolderColumnId::Lufsi,
+            FolderColumnId::MinPsr,
+            FolderColumnId::Duration,
+            FolderColumnId::FileName,
+        ];
+        Self {
+            dr_pmf: true,
+            max_sppm_joint: true,
+            max_tpl_itu: true,
+            lufsi: true,
+            min_psr: true,
+            duration: true,
+            file_name: true,
+            column_order: FolderColumnId::order_with_front(&front),
+            ..Self::empty()
+        }
+    }
+
     /// Compact DR-only preset (Track Name, DR PMF, DR L/R, Max TPL, LUFSi).
     pub fn minimal() -> Self {
         Self {
@@ -273,6 +519,7 @@ impl FolderColumnsConfig {
     pub fn all_enabled() -> Self {
         Self {
             file_name: true,
+            duration: true,
             file_format: true,
             sample_rate: true,
             word_length: true,
@@ -294,44 +541,129 @@ impl FolderColumnsConfig {
             max_sppm_joint: true,
             max_sppm_left: true,
             max_sppm_right: true,
+            rms_joint: true,
             rms_left: true,
             rms_right: true,
             plr: true,
             min_psr: true,
+            column_order: FolderColumnId::default_order(),
         }
+    }
+
+    pub fn is_enabled(&self, col: FolderColumnId) -> bool {
+        match col {
+            FolderColumnId::FileName => self.file_name,
+            FolderColumnId::Duration => self.duration,
+            FolderColumnId::FileFormat => self.file_format,
+            FolderColumnId::SampleRate => self.sample_rate,
+            FolderColumnId::WordLength => self.word_length,
+            FolderColumnId::BitsUsed => self.bits_used,
+            FolderColumnId::DrPmf => self.dr_pmf,
+            FolderColumnId::DrLeft => self.dr_left,
+            FolderColumnId::DrRight => self.dr_right,
+            FolderColumnId::MaxTplItu => self.max_tpl_itu,
+            FolderColumnId::MaxTplLeft => self.max_tpl_left,
+            FolderColumnId::MaxTplRight => self.max_tpl_right,
+            FolderColumnId::Lufsi => self.lufsi,
+            FolderColumnId::Lra => self.lra,
+            FolderColumnId::MaxMomItu => self.max_mom_itu,
+            FolderColumnId::MaxShortTermItu => self.max_short_term_itu,
+            FolderColumnId::MaxMomLeft => self.max_mom_left,
+            FolderColumnId::MaxMomRight => self.max_mom_right,
+            FolderColumnId::MaxShortTermLeft => self.max_short_term_left,
+            FolderColumnId::MaxShortTermRight => self.max_short_term_right,
+            FolderColumnId::MaxSppmJoint => self.max_sppm_joint,
+            FolderColumnId::MaxSppmLeft => self.max_sppm_left,
+            FolderColumnId::MaxSppmRight => self.max_sppm_right,
+            FolderColumnId::RmsJoint => self.rms_joint,
+            FolderColumnId::RmsLeft => self.rms_left,
+            FolderColumnId::RmsRight => self.rms_right,
+            FolderColumnId::Plr => self.plr,
+            FolderColumnId::MinPsr => self.min_psr,
+        }
+    }
+
+    pub fn set_enabled(&mut self, col: FolderColumnId, val: bool) {
+        let was_enabled = self.is_enabled(col);
+        let active_before = self.active_ordered();
+        match col {
+            FolderColumnId::FileName => self.file_name = val,
+            FolderColumnId::Duration => self.duration = val,
+            FolderColumnId::FileFormat => self.file_format = val,
+            FolderColumnId::SampleRate => self.sample_rate = val,
+            FolderColumnId::WordLength => self.word_length = val,
+            FolderColumnId::BitsUsed => self.bits_used = val,
+            FolderColumnId::DrPmf => self.dr_pmf = val,
+            FolderColumnId::DrLeft => self.dr_left = val,
+            FolderColumnId::DrRight => self.dr_right = val,
+            FolderColumnId::MaxTplItu => self.max_tpl_itu = val,
+            FolderColumnId::MaxTplLeft => self.max_tpl_left = val,
+            FolderColumnId::MaxTplRight => self.max_tpl_right = val,
+            FolderColumnId::Lufsi => self.lufsi = val,
+            FolderColumnId::Lra => self.lra = val,
+            FolderColumnId::MaxMomItu => self.max_mom_itu = val,
+            FolderColumnId::MaxShortTermItu => self.max_short_term_itu = val,
+            FolderColumnId::MaxMomLeft => self.max_mom_left = val,
+            FolderColumnId::MaxMomRight => self.max_mom_right = val,
+            FolderColumnId::MaxShortTermLeft => self.max_short_term_left = val,
+            FolderColumnId::MaxShortTermRight => self.max_short_term_right = val,
+            FolderColumnId::MaxSppmJoint => self.max_sppm_joint = val,
+            FolderColumnId::MaxSppmLeft => self.max_sppm_left = val,
+            FolderColumnId::MaxSppmRight => self.max_sppm_right = val,
+            FolderColumnId::RmsJoint => self.rms_joint = val,
+            FolderColumnId::RmsLeft => self.rms_left = val,
+            FolderColumnId::RmsRight => self.rms_right = val,
+            FolderColumnId::Plr => self.plr = val,
+            FolderColumnId::MinPsr => self.min_psr = val,
+        }
+
+        if !was_enabled && val {
+            // Place newly enabled column at the end of active columns (or right before trailing FileName)
+            let mut new_active = active_before;
+            if new_active.len() >= 2 && new_active.last() == Some(&FolderColumnId::FileName) && col != FolderColumnId::FileName {
+                let insert_pos = new_active.len() - 1;
+                new_active.insert(insert_pos, col);
+            } else {
+                new_active.push(col);
+            }
+            self.column_order = FolderColumnId::order_with_front(&new_active);
+        }
+    }
+
+    pub fn normalized_order(&self) -> Vec<FolderColumnId> {
+        FolderColumnId::order_with_front(&self.column_order)
+    }
+
+    pub fn active_ordered(&self) -> Vec<FolderColumnId> {
+        self.normalized_order()
+            .into_iter()
+            .filter(|&c| self.is_enabled(c))
+            .collect()
+    }
+
+    pub fn move_active_column(&mut self, from_idx: usize, to_idx: usize) -> bool {
+        let mut active = self.active_ordered();
+        if from_idx >= active.len() || to_idx >= active.len() || from_idx == to_idx {
+            return false;
+        }
+        let item = active.remove(from_idx);
+        active.insert(to_idx, item);
+        self.column_order = FolderColumnId::order_with_front(&active);
+        true
+    }
+
+    pub fn reset_order_for_style(&mut self, style: FolderLogStyle) {
+        let template = Self::for_style(style);
+        self.column_order = template.column_order;
     }
 
     /// Returns `(active_columns, total_columns)`.
     pub fn active_count(&self) -> (usize, usize) {
-        let flags = [
-            self.file_name,
-            self.file_format,
-            self.sample_rate,
-            self.word_length,
-            self.bits_used,
-            self.dr_pmf,
-            self.dr_left,
-            self.dr_right,
-            self.max_tpl_itu,
-            self.max_tpl_left,
-            self.max_tpl_right,
-            self.lufsi,
-            self.lra,
-            self.max_mom_itu,
-            self.max_short_term_itu,
-            self.max_mom_left,
-            self.max_mom_right,
-            self.max_short_term_left,
-            self.max_short_term_right,
-            self.max_sppm_joint,
-            self.max_sppm_left,
-            self.max_sppm_right,
-            self.rms_left,
-            self.rms_right,
-            self.plr,
-            self.min_psr,
-        ];
-        (flags.iter().filter(|&&f| f).count(), flags.len())
+        let active = FolderColumnId::ALL
+            .iter()
+            .filter(|&&c| self.is_enabled(c))
+            .count();
+        (active, FolderColumnId::ALL.len())
     }
 }
 

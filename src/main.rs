@@ -25,6 +25,9 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([initial_cfg.window_width, initial_cfg.window_height])
         .with_min_inner_size([config::MIN_WINDOW_WIDTH, config::MIN_WINDOW_HEIGHT])
         .with_drag_and_drop(true);
+    if let Ok(icon) = math_svg::rasterize_icon_svg(include_bytes!("../assets/icon.svg"), 256) {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
     if let (Some(x), Some(y)) = (initial_cfg.window_x, initial_cfg.window_y) {
         viewport = viewport.with_position([x, y]);
     }
@@ -810,17 +813,17 @@ mod tests {
 
         let minimal = FolderColumnsConfig::minimal();
         assert!(minimal.dr_pmf && !minimal.max_tpl_left && !minimal.lra);
-        assert_eq!(minimal.active_count(), (6, 26));
+        assert_eq!(minimal.active_count(), (6, 28));
         let mastering = FolderColumnsConfig::mastering();
         assert!(mastering.lra && mastering.plr && mastering.min_psr && !mastering.dr_left);
         let all = FolderColumnsConfig::all_enabled();
-        assert!(all.file_name && all.bits_used && all.plr && all.min_psr);
-        assert_eq!(all.active_count(), (26, 26));
+        assert!(all.file_name && all.duration && all.rms_joint && all.bits_used && all.plr && all.min_psr);
+        assert_eq!(all.active_count(), (28, 28));
     }
 
     #[test]
     fn test_folder_log_styles_tree_and_multi_drop() {
-        use crate::config::FolderLogStyle;
+        use crate::config::{FolderColumnId, FolderColumnsConfig, FolderLogStyle};
         use crate::scanner::{spawn_scan_job, ScanEvent, ScanTarget};
         use crossbeam_channel::unbounded;
         use std::path::PathBuf;
@@ -869,11 +872,12 @@ mod tests {
 
         // 1. Classic foo_dr style: omits foobar2000 & log date lines, matches exact columns & footer
         let cfg = AppConfig::default();
+        let classic_cols = FolderColumnsConfig::classic_foo_dr();
         let classic = format_folder_log(
             &temp_root,
             &tracks,
             FolderLogStyle::ClassicFooDr,
-            &cfg.folder_columns,
+            &classic_cols,
             &cfg.log_filenames,
             cfg.surround_folder_mode,
         );
@@ -896,12 +900,42 @@ mod tests {
         assert!(classic.contains("Codec:             PCM (WAV)"));
         assert_eq!(clines.last().copied(), Some("=".repeat(80).as_str()));
 
+        // Verify Classic foo_dr can be expanded with extra columns (e.g. TPL & LUFSi) and reordered
+        let mut expanded_classic_cols = FolderColumnsConfig::classic_foo_dr();
+        expanded_classic_cols.set_enabled(FolderColumnId::MaxTplItu, true);
+        expanded_classic_cols.set_enabled(FolderColumnId::Lufsi, true);
+        assert_eq!(
+            expanded_classic_cols.active_ordered(),
+            vec![
+                FolderColumnId::DrPmf,
+                FolderColumnId::MaxSppmJoint,
+                FolderColumnId::RmsJoint,
+                FolderColumnId::Duration,
+                FolderColumnId::MaxTplItu,
+                FolderColumnId::Lufsi,
+                FolderColumnId::FileName,
+            ]
+        );
+        let expanded_classic = format_folder_log(
+            &temp_root,
+            &tracks,
+            FolderLogStyle::ClassicFooDr,
+            &expanded_classic_cols,
+            &cfg.log_filenames,
+            cfg.surround_folder_mode,
+        );
+        assert!(expanded_classic.contains("TPL"));
+        assert!(expanded_classic.contains("LUFSi"));
+        assert!(expanded_classic.contains("dBTP"));
+        assert!(expanded_classic.contains("LUFS"));
+
         // 2. Compact Mastering style: pure ASCII with summary header + key dynamics columns
+        let compact_cols = FolderColumnsConfig::compact_mastering();
         let compact = format_folder_log(
             &temp_root,
             &tracks,
             FolderLogStyle::CompactMastering,
-            &cfg.folder_columns,
+            &compact_cols,
             &cfg.log_filenames,
             cfg.surround_folder_mode,
         );
@@ -912,6 +946,30 @@ mod tests {
         assert!(compact.contains("TPL dBTP"));
         assert!(compact.contains("LUFSi"));
         assert!(compact.contains("PSR"));
+
+        // Verify Compact Mastering can also be expanded (e.g. adding LRA & PLR) and reordered
+        let mut expanded_compact_cols = FolderColumnsConfig::compact_mastering();
+        expanded_compact_cols.set_enabled(FolderColumnId::Lra, true);
+        expanded_compact_cols.set_enabled(FolderColumnId::Plr, true);
+        assert!(expanded_compact_cols.move_active_column(0, 1));
+        assert_eq!(
+            expanded_compact_cols.active_ordered()[0],
+            FolderColumnId::MaxSppmJoint
+        );
+        assert_eq!(
+            expanded_compact_cols.active_ordered()[1],
+            FolderColumnId::DrPmf
+        );
+        let expanded_compact = format_folder_log(
+            &temp_root,
+            &tracks,
+            FolderLogStyle::CompactMastering,
+            &expanded_compact_cols,
+            &cfg.log_filenames,
+            cfg.surround_folder_mode,
+        );
+        assert!(expanded_compact.contains("LRA"));
+        assert!(expanded_compact.contains("PLR"));
 
         // 3. Default scan does NOT recurse into subdirectories (only sees 1 root file)
         let mut flat_cfg = AppConfig::default();
@@ -1171,6 +1229,31 @@ mod tests {
         s = "".to_string();
         assert!(!commit_max_len_input(&mut s, &mut cur));
         assert_eq!((cur, s.as_str()), (255, "255"));
+    }
+
+    #[test]
+    fn test_app_icon_svg_rasterizes_cleanly() {
+        let icon = crate::math_svg::rasterize_icon_svg(include_bytes!("../assets/icon.svg"), 256)
+            .expect("assets/icon.svg must rasterize cleanly");
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+        // Center of icon and dark background must be opaque
+        let center_idx = (128 * 256 + 128) * 4;
+        assert_eq!(icon.rgba[center_idx + 3], 255);
+
+        let back =
+            crate::math_svg::rasterize_icon_svg(include_bytes!("../assets/back_arrow.svg"), 24)
+                .expect("assets/back_arrow.svg must rasterize cleanly");
+        assert_eq!((back.width, back.height), (24, 24));
+        let non_empty = back.rgba.chunks_exact(4).filter(|px| px[3] > 20).count();
+        assert!(non_empty > 20);
+
+        let fwd =
+            crate::math_svg::rasterize_icon_svg(include_bytes!("../assets/forward_arrow.svg"), 24)
+                .expect("assets/forward_arrow.svg must rasterize cleanly");
+        assert_eq!((fwd.width, fwd.height), (24, 24));
+        let fwd_non_empty = fwd.rgba.chunks_exact(4).filter(|px| px[3] > 20).count();
+        assert!(fwd_non_empty > 20);
     }
 }
 

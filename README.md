@@ -14,10 +14,11 @@ Zero runtime dependencies or FFmpeg installations required — decoding, filteri
   - Supports **WAV**, **BWF**, **AIFF** (`.aif`, `.aifc`, `.aiff`), **RF64/BW64**, **Sony Wave64** (`.w64`), **FLAC**, **ALAC** (`.alac`, `.m4a`, `.mp4`), **CAF**, **MP3**, **AAC**, and **Ogg Vorbis** (`.ogg`, `.oga`).
   - Supports lossless integer [PCM](https://en.wikipedia.org/wiki/Pulse-code_modulation) (8, 16, 24, 32-bit) as well as 32-bit and 64-bit [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) floating-point streams across mono, stereo, 5.1, 7.1, and multichannel layouts.
 - **Parallel Multi-Core Processing:** Album folders and multi-folder drops decode and analyze tracks concurrently using a configurable `Rayon` thread pool with real-time progress reporting and instant cancellation.
-- **Three Folder Log Styles (`Settings -> Folder Logs (DR.txt)`):**
-  - **TruePeaks Table (Default):** Pipe-delimited multi-column table with 26 individually toggleable metrics and presets (`Standard`, `Minimal DR`, `Mastering`, `All Columns`), expanding per-channel columns automatically for surround files when enabled.
-  - **Classic DR (`foo_dr` Style):** Reproduces the traditional `DR / Peak / RMS / Duration / Track` layout and album codec summary (`Number of tracks`, `Official DR value`, `Samplerate`, `Channels`, `Bits per sample`, `Bitrate`, `Codec`) while omitting software/date header banners.
-  - **Compact Mastering:** Pure-ASCII mastering overview featuring duration-weighted average loudness, max true peak, and max sample peak above tightly aligned `DR`, `Peak dB`, `TPL dBTP`, `LUFSi`, `PSR`, `Time`, and `Track` columns.
+- **Three Customizable Folder Log Styles (`Settings -> Folder Logs (DR.txt)`):**
+  - All three styles share 28 individually toggleable and reorderable columns (drag-and-drop or `<` / `>` reordering) plus presets (`Standard`, `Classic DR`, `Compact Mastering`, `Minimal DR`, `Mastering`, `All Columns`), expanding per-channel columns automatically for surround files when enabled.
+  - **TruePeaks Table (Default):** Pipe-delimited multi-column spreadsheet table.
+  - **Classic DR (`foo_dr` Style):** Reproduces the traditional `DR / Peak / RMS / Duration / Track` layout and album codec summary (`Number of tracks`, `Official DR value`, `Samplerate`, `Channels`, `Bits per sample`, `Bitrate`, `Codec`) while omitting software/date header banners, and can be expanded with any additional TruePeaks metrics.
+  - **Compact Mastering:** Pure-ASCII mastering overview featuring duration-weighted average loudness, max true peak, and max sample peak above tightly aligned `DR`, `Peak dB`, `TPL dBTP`, `LUFSi`, `PSR`, `Time`, and `Track` columns (plus any additional enabled columns).
 - **Flexible Batch & Directory Workflows:**
   - Drag and drop single files, single album folders, or **multiple folders at once** (creates a separate log inside each folder by default, or merges into one combined batch log when enabled).
   - Optional recursive subfolder scanning (**off** by default).
