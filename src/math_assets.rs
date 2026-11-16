@@ -225,3 +225,18 @@ pub const SECTION_7: &[MathSvgAsset] = &[
         svgz: include_bytes!("../assets/math/s7_01.svgz"),
     },
 ];
+
+pub const SECTION_8: &[MathSvgAsset] = &[
+    MathSvgAsset {
+        id: "s8_01",
+        width_pt: 650.74_f32,
+        height_pt: 95.02_f32,
+        svgz: include_bytes!("../assets/math/s8_01.svgz"),
+    },
+    MathSvgAsset {
+        id: "s8_02",
+        width_pt: 191.87_f32,
+        height_pt: 15.67_f32,
+        svgz: include_bytes!("../assets/math/s8_02.svgz"),
+    },
+];

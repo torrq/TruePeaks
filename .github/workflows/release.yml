@@ -70,28 +70,34 @@ jobs:
           key: ${{ matrix.cache_key }}
 
       - name: Run release tests (native host target)
-        run: cargo test --release --locked
+        run: |
+          cargo test --release --locked
+          cargo check --release --locked --no-default-features --bin truepeaks-cli
 
       - name: Build release binary (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          cargo build --release --locked --target x86_64-pc-windows-msvc
+          cargo build --release --locked --target x86_64-pc-windows-msvc --bin truepeaks
+          cargo build --release --locked --no-default-features --target x86_64-pc-windows-msvc --bin truepeaks-cli
           New-Item -ItemType Directory -Force -Path dist/stage | Out-Null
           Copy-Item target/x86_64-pc-windows-msvc/release/truepeaks.exe dist/stage/
+          Copy-Item target/x86_64-pc-windows-msvc/release/truepeaks-cli.exe dist/stage/
           Copy-Item README.md, LICENSE dist/stage/
           Compress-Archive -Path dist/stage/* -DestinationPath dist/truepeaks-windows-x86_64.zip -Force
 
       - name: Build release binary (Linux glibc 2.28+)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28
+          cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.28 --bin truepeaks
+          cargo zigbuild --release --locked --no-default-features --target x86_64-unknown-linux-gnu.2.28 --bin truepeaks-cli
           BIN="target/x86_64-unknown-linux-gnu/release/truepeaks"
-          strip "$BIN"
+          CLI_BIN="target/x86_64-unknown-linux-gnu/release/truepeaks-cli"
+          strip "$BIN" "$CLI_BIN"
           echo "=== Shared library dependencies ==="
           ldd "$BIN" || true
           echo "=== Required GLIBC symbol versions ==="
-          GLIBC_VERS=$(objdump -T "$BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -Vu || true)
+          GLIBC_VERS=$(objdump -T "$BIN" "$CLI_BIN" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -Vu || true)
           echo "$GLIBC_VERS"
           MAX_VER=$(echo "$GLIBC_VERS" | sed 's/GLIBC_//' | sort -V | tail -n1)
           echo "Max required GLIBC version: ${MAX_VER:-none}"
@@ -99,7 +105,7 @@ jobs:
             python3 -c "import sys; v=tuple(int(x) for x in '$MAX_VER'.split('.')); sys.exit(0 if v[:2] <= (2, 28) else 1)"
           fi
           mkdir -p dist/stage
-          cp "$BIN" dist/stage/
+          cp "$BIN" "$CLI_BIN" dist/stage/
           cp README.md LICENSE dist/stage/
           tar -czf dist/truepeaks-linux-x86_64.tar.gz -C dist/stage .
 
@@ -108,14 +114,22 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
-          cargo build --release --locked --target aarch64-apple-darwin
-          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin --bin truepeaks
+          cargo build --release --locked --target x86_64-apple-darwin --bin truepeaks
+          cargo build --release --locked --no-default-features --target aarch64-apple-darwin --bin truepeaks-cli
+          cargo build --release --locked --no-default-features --target x86_64-apple-darwin --bin truepeaks-cli
           mkdir -p dist/stage/TruePeaks.app/Contents/MacOS
+          mkdir -p dist/stage/TruePeaks.app/Contents/Resources
+          cp assets/icon.icns dist/stage/TruePeaks.app/Contents/Resources/TruePeaks.icns
           lipo -create \
             target/aarch64-apple-darwin/release/truepeaks \
             target/x86_64-apple-darwin/release/truepeaks \
             -output dist/stage/TruePeaks.app/Contents/MacOS/truepeaks
-          chmod +x dist/stage/TruePeaks.app/Contents/MacOS/truepeaks
+          lipo -create \
+            target/aarch64-apple-darwin/release/truepeaks-cli \
+            target/x86_64-apple-darwin/release/truepeaks-cli \
+            -output dist/stage/truepeaks-cli
+          chmod +x dist/stage/TruePeaks.app/Contents/MacOS/truepeaks dist/stage/truepeaks-cli
           APP_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           cat << EOF > dist/stage/TruePeaks.app/Contents/Info.plist
           <?xml version="1.0" encoding="UTF-8"?>
@@ -124,6 +138,8 @@ jobs:
           <dict>
             <key>CFBundleExecutable</key>
             <string>truepeaks</string>
+            <key>CFBundleIconFile</key>
+            <string>TruePeaks.icns</string>
             <key>CFBundleIdentifier</key>
             <string>org.truepeaks.TruePeaks</string>
             <key>CFBundleName</key>
@@ -175,5 +191,85 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          generate_release_notes: true
+          generate_release_notes: false
+          body: |
+            ```text
+            TruePeaks v0.1.7 Changelog (since v0.1.6)
+            =========================================
+
+            New Ways to View & Compare Your Audio
+            -------------------------------------
+            - Interactive Visual View (new default view):
+              - Displays a clean album summary bar at the top (Official DR, track count
+                and total time, average loudness, album ReplayGain, and highest True Peak).
+              - Shows a color-coded, sortable track table where you can click any column
+                header to sort by DR, loudness, peak level, duration, or track name.
+              - Includes an interactive timeline chart for the selected track showing the
+                peak level and loudness curve over time, with pin markers for the loudest
+                moment and the most compressed 3-second section.
+              - Prefer starting on the classic text report? You can switch the default
+                startup view back to "Text Log" anytime in Settings -> Appearance & App.
+
+            - Side-by-Side A/B Mastering Comparison ("Compare A/B" tab):
+              - Compare two different editions or masters of an album (for example, an
+                original CD release vs. a remaster) side-by-side.
+              - Automatically highlights differences in Dynamic Range, loudness (LUFS),
+                and True Peak for every track, and lets you copy a ready-to-share text
+                comparison report.
+
+            - Recent Scans History & Scan Queue:
+              - Switch back to any of your last 16 analyzed albums or files during a
+                session using the "Recent" dropdown in the top-right corner.
+              - Drop additional folders or files while a scan is already running to line
+                them up in a queue, with buttons to remove individual items, skip the
+                current scan, or clear the queue.
+
+            New Formats, Exports & Metadata Support
+            ---------------------------------------
+            - CD Cue Sheet (.cue) Support:
+              - Drop or open a .cue file paired with a single-file album image (WAV, FLAC,
+                etc.) to analyze every track individually in a single pass.
+
+            - Embedded Audio Tags:
+              - Optional setting in Folder Logs to use embedded track titles and track
+                numbers (from FLAC, MP3, ALAC/M4A, Ogg, and WAV tags) instead of raw
+                filenames.
+              - Improved handling of accented characters (such as French, German, or
+                Spanish titles from macOS) so track names always display and align cleanly.
+
+            - More Export Options & Central Output Folder:
+              - Export any completed analysis directly to CSV spreadsheet (.csv), Markdown
+                table (.md), JSON (.json), or plain text (.txt) from the top "Export..."
+                menu.
+              - Added a 4th Folder Log Style: "JSON", with customizable and reorderable
+                fields.
+              - Each of the 4 folder log styles now remembers its own column selections
+                and column order independently, with a live preview card right inside
+                Settings.
+              - Added an optional "Custom Output Folder" setting so auto-saved logs can be
+                collected in one central folder instead of being saved inside each music
+                folder (useful for read-only drives or network shares).
+
+            New Audio Measurements
+            ----------------------
+            - ReplayGain 2.0 Track & Album Gain:
+              - Shows the recommended volume adjustment (in dB) needed to match the
+                standard -18.0 LUFS playback target.
+            - Stereo Phase Correlation:
+              - Measures how in-phase or out-of-phase the Left and Right channels are
+                (from +1.00 for mono/in-phase down to -1.00 for inverted phase).
+            - Peak Timing & Oversampling Details:
+              - Pinpoints the exact minute and second of the highest sample peak and the
+                most compressed passage, along with the True Peak oversampling rate used.
+
+            Standalone Command-Line Tool (truepeaks-cli)
+            --------------------------------------------
+            - Added a lightweight companion command-line app (truepeaks-cli) alongside the
+              desktop app for batch scripting and automation:
+              - Reads your saved TruePeaks settings automatically, while allowing any
+                setting, style, or column list to be overridden temporarily for a single
+                run without changing your saved preferences.
+              - Shows live scan progress in the terminal (with a --quiet option to hide
+                it) and includes a full built-in manual via --longhelp.
+            ```
           files: dist/*

@@ -1,7 +1,7 @@
 use crate::config::{LogFilenameOptions, SingleFileRowsConfig};
 use crate::decoder::layout_description;
 use crate::dsp::TrackAnalysis;
-use crate::formatter::{format_log_track_name, format_sample_rate};
+use crate::formatter::{format_log_track_name, format_sample_rate, format_timestamp_mmss};
 
 pub fn format_single_file_log(
     track: &TrackAnalysis,
@@ -46,7 +46,7 @@ pub fn format_single_file_log(
     lines.push(String::new());
 
     // Channel header line
-    let mut ch_header = String::from(" ".repeat(51));
+    let mut ch_header = " ".repeat(51);
     for ch in &track.channels {
         let lbl = ch.single_log_header(num_ch);
         ch_header.push_str(&format!("{:<19}", lbl));
@@ -164,6 +164,48 @@ pub fn format_single_file_log(
         }
         line.push_str(&fmt_cell(&format!("{:.2}", track.lra), " (ITU)"));
         lines.push(line);
+    }
+
+    // 11. Optional ReplayGain 2.0 Offset (-18 LUFS reference)
+    if rows_cfg.replay_gain {
+        let mut line = format!("{:<49}", "ReplayGain 2.0 Track Gain (-18 LUFS ref.)");
+        for _ in 0..num_ch {
+            line.push_str(blank_cell);
+        }
+        let rg_val = track
+            .replay_gain_track_db
+            .map(|rg| format!("{:+.2}", rg))
+            .unwrap_or_else(|| "-".to_string());
+        line.push_str(&fmt_cell(&rg_val, " dB"));
+        lines.push(line);
+    }
+
+    // 12. Optional Stereo Correlation
+    if rows_cfg.stereo_correlation {
+        let mut line = format!("{:<49}", "Stereo Phase Correlation (L/R Pearson r)");
+        for _ in 0..num_ch {
+            line.push_str(blank_cell);
+        }
+        let corr_val = track
+            .stereo_correlation
+            .map(|r| format!("{:+.3}", r))
+            .unwrap_or_else(|| "-".to_string());
+        line.push_str(&fmt_cell(&corr_val, " (L/R)"));
+        lines.push(line);
+    }
+
+    // 13. Optional Peak Timing Diagnostics
+    if rows_cfg.peak_timing_diagnostics {
+        let psr_at = track
+            .min_psr_time_secs
+            .map(format_timestamp_mmss)
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(format!(
+            "Peak / TPL Timing: Max SPPM @ {} | Min. PSR @ {} | TPL {}x",
+            format_timestamp_mmss(track.max_sppm_time_secs),
+            psr_at,
+            track.tpl_oversample_factor,
+        ));
     }
 
     lines.join("\n")

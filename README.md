@@ -10,23 +10,26 @@ Zero runtime dependencies or FFmpeg installations required — decoding, filteri
 
 ## Features
 
-- **Pure-Rust Decoding (`Symphonia` + Custom `RF64`/`BW64`/`W64` Reader):**
-  - Supports **WAV**, **BWF**, **AIFF** (`.aif`, `.aifc`, `.aiff`), **RF64/BW64**, **Sony Wave64** (`.w64`), **FLAC**, **ALAC** (`.alac`, `.m4a`, `.mp4`), **CAF**, **MP3**, **AAC**, and **Ogg Vorbis** (`.ogg`, `.oga`).
-  - Supports lossless integer [PCM](https://en.wikipedia.org/wiki/Pulse-code_modulation) (8, 16, 24, 32-bit) as well as 32-bit and 64-bit [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) floating-point streams across mono, stereo, 5.1, 7.1, and multichannel layouts.
-- **Parallel Multi-Core Processing:** Album folders and multi-folder drops decode and analyze tracks concurrently using a configurable `Rayon` thread pool with real-time progress reporting and instant cancellation.
-- **Three Customizable Folder Log Styles (`Settings -> Folder Logs (DR.txt)`):**
-  - All three styles share 28 individually toggleable and reorderable columns (drag-and-drop or `<` / `>` reordering) plus presets (`Standard`, `Classic DR`, `Compact Mastering`, `Minimal DR`, `Mastering`, `All Columns`), expanding per-channel columns automatically for surround files when enabled.
+- **Pure-Rust Decoding (`Symphonia` + Custom `RF64`/`BW64`/`W64` Reader + `.cue` Sheets):**
+  - Supports **WAV**, **BWF**, **AIFF** (`.aif`, `.aifc`, `.aiff`), **RF64/BW64**, **Sony Wave64** (`.w64`), **FLAC**, **ALAC** (`.alac`, `.m4a`, `.mp4`), **CAF**, **MP3**, **AAC**, **Ogg Vorbis** (`.ogg`, `.oga`), and CD image **`.cue` sheets** (single-pass sample-accurate multi-track slicing).
+  - Extracts embedded metadata tags (`TITLE`, `Artist`, `Album`, `TrackNumber`) with optional tag-based display titles, and supports lossless integer [PCM](https://en.wikipedia.org/wiki/Pulse-code_modulation) (8, 16, 24, 32-bit) as well as 32-bit and 64-bit [IEEE 754](https://en.wikipedia.org/wiki/IEEE_754) floating-point streams across mono, stereo, 5.1, 7.1, and multichannel layouts.
+- **Parallel Multi-Core Processing & Deeper Diagnostics:**
+  - Album folders, `.cue` sheets, and multi-folder drops decode and analyze tracks concurrently using a configurable `Rayon` thread pool with real-time progress reporting and instant cancellation (plus drag-and-drop / file-picker scan queuing while a scan is in progress).
+  - Computes **ReplayGain 2.0 Track Gain**, **Pearson Stereo Phase Correlation (`r`)**, **True Peak Oversampling Factor (`4x` / `2x` / `1x`)**, and exact **`Max SPPM` / `Min. PSR` timestamps**.
+- **Interactive Visual Analyzer, Sparkline Inspector & A/B Comparison:**
+  - Defaults to **Visual View** (configurable in `Settings -> Appearance & App`) with **Text Log**, **Compare A/B** (`ΔDR`, `ΔLUFSi`, `ΔTPL`), and a `Recent` session switcher.
+  - Features an equal-width album KPI summary strip, color-coded sortable track grid, and a responsive per-track **Timeline Sparkline Chart** showing Sample Peak envelope, Short-Term LUFS curve, hover crosshair readout, and `Max SPPM` / `Min. PSR` pins.
+- **Four Customizable Folder Log Styles & Profiles (`Settings -> Folder Logs (DR.txt)`):**
+  - **31 individually toggleable & reorderable columns** (drag-and-drop handles and crisp reorder buttons) saved independently per log style (`TruePeaks Table`, `Classic DR`, `Compact Mastering`, `JSON`) alongside presets (`Standard`, `Classic DR`, `Compact Mastering`, `Minimal DR`, `Mastering`, `All Columns`) and context-specific **Live Format Preview** cards.
   - **TruePeaks Table (Default):** Pipe-delimited multi-column spreadsheet table.
-  - **Classic DR (`foo_dr` Style):** Reproduces the traditional `DR / Peak / RMS / Duration / Track` layout and album codec summary (`Number of tracks`, `Official DR value`, `Samplerate`, `Channels`, `Bits per sample`, `Bitrate`, `Codec`) while omitting software/date header banners, and can be expanded with any additional TruePeaks metrics.
-  - **Compact Mastering:** Pure-ASCII mastering overview featuring duration-weighted average loudness, max true peak, and max sample peak above tightly aligned `DR`, `Peak dB`, `TPL dBTP`, `LUFSi`, `PSR`, `Time`, and `Track` columns (plus any additional enabled columns).
-- **Flexible Batch & Directory Workflows:**
-  - Drag and drop single files, single album folders, or **multiple folders at once** (creates a separate log inside each folder by default, or merges into one combined batch log when enabled).
-  - Optional recursive subfolder scanning (**off** by default).
-- **Safe Output & Filename Controls (`Settings -> Output & Files`):**
+  - **Classic DR (`foo_dr` Style):** Reproduces the traditional `DR / Peak / RMS / Duration / Track` layout and album codec summary (`Number of tracks`, `Official DR value`, `Samplerate`, `Channels`, `Bits per sample`, `Bitrate`, `Codec`) while omitting software/date header banners, expandable with any additional TruePeaks metrics.
+  - **Compact Mastering:** Pure-ASCII mastering overview featuring duration-weighted average loudness, max true peak, and max sample peak above tightly aligned `DR`, `Peak dB`, `TPL dBTP`, `LUFSi`, `PSR`, `Time`, and `Track` columns (expandable with any additional columns).
+  - **JSON:** Machine-readable structured JSON report with album metadata and customizable per-track metrics for scripts and automation.
+- **Multi-Format Exports, Safe Output & CLI Automation (`Settings -> Output & Files`):**
+  - Export any completed scan directly as **`.csv`**, **`.md`** (Markdown), **`.json`**, or **`.txt`**, or auto-save to either the scanned folder or a custom central output directory.
   - Collision-safe atomic saving via `create_new` — existing logs are preserved by numbering new files (`DR_2.txt`, `DR_3.txt`, etc.) unless **Overwrite Existing Log File** is selected.
-  - Dynamic filename templates (`{folder_name}`, `{file_name}`, `{ext}`, `{album_dr}`, `{date}`, `{time}`).
-  - Optional logged track-name truncation (default suggestion: `64` characters) and non-ASCII character stripping applied strictly inside log text without renaming files on disk.
-  - Export encodings: `UTF-8`, `UTF-8 with BOM`, `UTF-16 LE`, `UTF-16 BE`, and `Windows-1252`, with `CRLF`, `LF`, or `CR` line endings.
+  - Dynamic filename templates (`{folder_name}`, `{file_name}`, `{ext}`, `{album_dr}`, `{date}`, `{time}`), optional logged track-name truncation (`64` characters default suggestion), optional non-ASCII stripping, and `UTF-8` / `UTF-8 BOM` / `UTF-16 LE` / `UTF-16 BE` / `Windows-1252` encodings (`CRLF` / `LF` / `CR`).
+  - **Headless CLI & Explorer "Open With":** Pass paths directly to launch the GUI and auto-scan, or run `--cli` / `--json` / `--csv` / `--md` / `--txt` headless for scripts and CI pipelines (`truepeaks --help`).
 - **Native Desktop UI (`eframe` / `egui`):**
   - Automatic `System Default`, `Dark`, and `Light` themes, adjustable monospace log font size (`A-` / `A+` or `10–22 pt`), full-view split Settings screen, About screen (click the top-left `TruePeaks` badge/title), and persistent window size and position (`980 × 660` centered default).
 
@@ -45,6 +48,13 @@ Settings are persisted automatically in `config.toml` under the standard OS conf
 - **Windows:** `%APPDATA%\TruePeaks\TruePeaks\config\config.toml`
 - **macOS:** `~/Library/Application Support/org.TruePeaks.TruePeaks/config.toml`
 - **Linux:** `$XDG_CONFIG_HOME/truepeaks/config.toml` (or `~/.config/truepeaks/config.toml`)
+
+**Command-Line & "Open With" Usage:**
+- `truepeaks <path>...` — Launch the desktop UI and immediately analyze the supplied file(s), `.cue` sheet, or folder(s).
+- `truepeaks-cli [OPTIONS] <path>...` — Standalone zero-GUI console executable sharing your `config.toml` settings (`truepeaks --cli ...` also runs headlessly from the main binary).
+  - Supports temporary per-run log/analysis overrides without modifying `config.toml`: `--format txt|csv|md|json` (`--txt`/`--csv`/`--md`/`--json`), `--style table|classic|compact|json`, `--preset <name>`, `--columns <c1,c2,...>`, `--add-column`/`--remove-column`, `--single-rows <spec>`, `--diagnostics`, `--recurse`, `--combine`, `--lfe`, `--tags`, `--surround expand|strict`, `--max-name-len`, `--ascii`, `--charset`, `--line-ending`, `--folder-pattern`, `--single-pattern`, `--output-dir`, `--overwrite`, `--save`, `--no-config`, `--config <toml>`, and repeatable `--set key=value`.
+  - Streams progress updates to `stderr` by default (leaving `stdout` pure for pipes/scripts); pass `--no-progress` or `-q` / `--quiet` to disable.
+  - AI-agent & automation helpers: `--help-json` (machine-readable CLI schema & column list), `--longhelp` (full reference manual with every flag & column explained), `--print-config-json` / `--print-config`, `--flag=value` syntax, and structured exit codes (`0` success, `1` runtime error, `2` invalid flags/config override). Run `truepeaks-cli --help` or `--longhelp` for full details.
 
 ---
 
@@ -340,7 +350,7 @@ p_{c,(1)}, & K = 1
 \text{Official Album DR} = \mathrm{round}\!\left(\frac{1}{T}\sum_{t=1}^{T} \text{DR}_{\text{track, raw}}^{(t)}\right)
 ```
 
-(Because whole-track $`\text{RMS}_{\text{AES17}, c} = 10\log_{10}\!\left(\frac{1}{K}\sum_{b=1}^K \sigma_{c,b}^2\right)`$ for uniform blocks, `dr_pmf` also computes per-channel AES17 RMS over block energies.)
+(Whole-track per-channel $`\text{RMS}_{\text{AES17}, c}`$ is accumulated sample-by-sample across all $`N`$ frames in `src/dsp/stats.rs` so partial final blocks never skew whole-track averages.)
 
 ---
 
@@ -350,6 +360,22 @@ When generating the `Classic DR (foo_dr Style)` album metadata block, aggregate 
 
 ```math
 \text{Bitrate (kbps)} = \mathrm{round}\!\left(\frac{8 \sum_{t=1}^{T} \text{bytes}_t}{1000 \sum_{t=1}^{T} (N_t / f_{s,t})}\right)
+```
+
+---
+
+### 8. Stereo Phase Correlation & ReplayGain 2.0
+
+For signals with at least two channels ($`C \ge 2`$), TruePeaks evaluates the [Pearson correlation coefficient](https://en.wikipedia.org/wiki/Pearson_correlation_coefficient) $`r_{LR} \in [-1, 1]`$ between Left ($`x_0`$) and Right ($`x_1`$) samples across all $`N`$ frames:
+
+```math
+r_{LR} = \frac{N \sum_{n=0}^{N-1} x_0[n] x_1[n] - \left(\sum_{n=0}^{N-1} x_0[n]\right)\left(\sum_{n=0}^{N-1} x_1[n]\right)}{\sqrt{\left(N \sum_{n=0}^{N-1} x_0[n]^2 - \left(\sum_{n=0}^{N-1} x_0[n]\right)^2\right)\left(N \sum_{n=0}^{N-1} x_1[n]^2 - \left(\sum_{n=0}^{N-1} x_1[n]\right)^2\right)}}
+```
+
+[ReplayGain](https://en.wikipedia.org/wiki/ReplayGain) 2.0 track gain targets a $`-18.0\text{ LUFS}`$ playback reference from EBU R128 integrated loudness $`I_{\text{LUFS}}`$:
+
+```math
+\mathrm{RG}_{\text{track}} = -18.0 - I_{\text{LUFS}}
 ```
 
 ---
@@ -371,6 +397,7 @@ The test suite generates synthetic audio test probes directly in temporary direc
 
 ```bash
 cargo build --release --locked
+cargo build --release --locked --no-default-features --bin truepeaks-cli
 cargo test --release --locked
 ```
 

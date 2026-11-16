@@ -1,19 +1,54 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub use truepeaks::{cli, config, decoder, dsp, formatter, scanner};
+
 pub mod app;
-pub mod config;
-pub mod decoder;
-pub mod dsp;
-pub mod formatter;
 pub mod math_assets;
 pub mod math_svg;
-pub mod scanner;
+pub mod visual_ui;
 
 use app::TruePeaksApp;
+use cli::{attach_parent_console_if_windows, execute_headless, parse_cli_args, CliAction};
 
 fn main() -> eframe::Result<()> {
     let mut initial_cfg = config::AppConfig::load();
     initial_cfg.sanitize_window_geometry();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let initial_target = match parse_cli_args(&args, &initial_cfg) {
+        CliAction::LaunchGui(target) => target,
+        CliAction::PrintAndExit(code, msg) => {
+            attach_parent_console_if_windows();
+            if code == 0 {
+                println!("{}", msg);
+            } else {
+                eprintln!("{}", msg);
+            }
+            std::process::exit(code);
+        }
+        CliAction::RunHeadless {
+            target,
+            config,
+            format,
+            output_path,
+            show_progress,
+        } => {
+            attach_parent_console_if_windows();
+            match execute_headless(target, config, format, output_path.as_deref(), show_progress) {
+                Ok(text) => {
+                    if output_path.is_none() {
+                        println!("{}", text);
+                    }
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!("Error: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
     let has_saved_pos = initial_cfg.has_saved_window_position();
 
     let window_title = format!(
@@ -41,11 +76,16 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "TruePeaks",
         native_options,
-        Box::new(move |cc| Ok(Box::new(TruePeaksApp::new(cc, initial_cfg)))),
+        Box::new(move |cc| Ok(Box::new(TruePeaksApp::new(cc, initial_cfg, initial_target)))),
     )
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::field_reassign_with_default,
+    clippy::needless_range_loop,
+    clippy::chunks_exact_to_as_chunks
+)]
 mod tests {
     use crate::config::{AppConfig, SurroundFolderMode};
     use crate::decoder::SpeakerChannel;
@@ -621,7 +661,7 @@ mod tests {
             let n = samples.len();
             let mut best = samples.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
             const BLK: usize = 32;
-            let n_blks = (n + BLK - 1) / BLK;
+            let n_blks = n.div_ceil(BLK);
             let blk_max: Vec<f64> = (0..n_blks)
                 .map(|b| {
                     let s = b * BLK;
@@ -769,7 +809,7 @@ mod tests {
         assert!((def.window_height - crate::config::DEFAULT_WINDOW_HEIGHT).abs() < 1e-6);
         assert!(!def.has_saved_window_position());
 
-        assert_eq!(FolderLogStyle::all().len(), 3);
+        assert_eq!(FolderLogStyle::all().len(), 4);
         assert_eq!(ThemeMode::System.next(), ThemeMode::Dark);
         assert_eq!(ThemeMode::Dark.next(), ThemeMode::Light);
         assert_eq!(ThemeMode::Light.next(), ThemeMode::System);
@@ -813,12 +853,28 @@ mod tests {
 
         let minimal = FolderColumnsConfig::minimal();
         assert!(minimal.dr_pmf && !minimal.max_tpl_left && !minimal.lra);
-        assert_eq!(minimal.active_count(), (6, 28));
+        assert_eq!(minimal.active_count(), (6, 31));
+        assert_eq!(
+            AppConfig::default().default_results_view,
+            crate::config::DefaultResultsView::VisualView
+        );
         let mastering = FolderColumnsConfig::mastering();
         assert!(mastering.lra && mastering.plr && mastering.min_psr && !mastering.dr_left);
         let all = FolderColumnsConfig::all_enabled();
-        assert!(all.file_name && all.duration && all.rms_joint && all.bits_used && all.plr && all.min_psr);
-        assert_eq!(all.active_count(), (28, 28));
+        assert!(all.file_name && all.duration && all.rms_joint && all.replay_gain_track && all.stereo_correlation && all.tpl_oversample);
+        assert_eq!(all.active_count(), (31, 31));
+
+        // Per-style column profile switching preserves customizations independently
+        let mut style_cfg = AppConfig::default();
+        style_cfg.folder_columns.replay_gain_track = true;
+        style_cfg.switch_folder_log_style(crate::config::FolderLogStyle::ClassicFooDr);
+        assert!(!style_cfg.folder_columns.replay_gain_track);
+        style_cfg.folder_columns.stereo_correlation = true;
+        style_cfg.switch_folder_log_style(crate::config::FolderLogStyle::TruePeaksTable);
+        assert!(style_cfg.folder_columns.replay_gain_track);
+        assert!(!style_cfg.folder_columns.stereo_correlation);
+        style_cfg.switch_folder_log_style(crate::config::FolderLogStyle::ClassicFooDr);
+        assert!(style_cfg.folder_columns.stereo_correlation);
     }
 
     #[test]
@@ -1097,6 +1153,26 @@ mod tests {
         assert!(!comb_compact_log.contains("Album:   Album A"));
         assert!(!comb_compact_log.contains("Album:   Album B"));
 
+        let mut json_cfg = AppConfig::default();
+        json_cfg.save_logs_to_disk = false;
+        json_cfg.switch_folder_log_style(FolderLogStyle::Json);
+        let (json_log, _, _, _) = run_scan_sync(ScanTarget::Folder(dir_a.clone()), json_cfg.clone());
+        assert!(json_log.starts_with('{') && json_log.trim_end().ends_with('}'));
+        assert!(json_log.contains("\"album_title\": \"Album A\""));
+        assert!(json_log.contains("\"official_dr\": 8"));
+        assert!(json_log.contains("\"tracks\": ["));
+
+        json_cfg.combine_dropped_folders = true;
+        let (comb_json_log, _, _, _) = run_scan_sync(
+            ScanTarget::Multi {
+                dirs: vec![dir_a.clone(), dir_b.clone()],
+                files: Vec::new(),
+            },
+            json_cfg,
+        );
+        assert!(comb_json_log.contains("\"combined_batch\": true"));
+        assert!(comb_json_log.contains("\"folders\": ["));
+
         // 7. Existing log preservation (default: number _2, _3) vs overwrite option
         assert_eq!(
             crate::formatter::numbered_candidate_path(Path::new("album/report"), 2),
@@ -1181,11 +1257,13 @@ mod tests {
     fn test_baked_math_svg_assets_rasterize_cleanly() {
         use crate::math_assets::{
             SECTION_1, SECTION_2, SECTION_3, SECTION_4, SECTION_5, SECTION_6, SECTION_7,
+            SECTION_8,
         };
         use crate::math_svg::rasterize_svg_rgba;
 
         let all_sections = [
             SECTION_1, SECTION_2, SECTION_3, SECTION_4, SECTION_5, SECTION_6, SECTION_7,
+            SECTION_8,
         ];
         let mut total = 0usize;
         for section in all_sections {
@@ -1206,7 +1284,7 @@ mod tests {
                 total += 1;
             }
         }
-        assert_eq!(total, 33);
+        assert_eq!(total, 35);
     }
 
     #[test]
@@ -1254,6 +1332,427 @@ mod tests {
         assert_eq!((fwd.width, fwd.height), (24, 24));
         let fwd_non_empty = fwd.rgba.chunks_exact(4).filter(|px| px[3] > 20).count();
         assert!(fwd_non_empty > 20);
+
+        for (name, bytes) in [
+            ("check.svg", &include_bytes!("../assets/check.svg")[..]),
+            ("external_link.svg", &include_bytes!("../assets/external_link.svg")[..]),
+        ] {
+            let ic = crate::math_svg::rasterize_icon_svg(bytes, 24)
+                .unwrap_or_else(|e| panic!("{} failed to rasterize: {}", name, e));
+            assert!(ic.rgba.chunks_exact(4).filter(|px| px[3] > 20).count() > 15);
+        }
+    }
+
+    #[test]
+    fn test_cue_sheet_diagnostics_exports_comparison_and_cli() {
+        use crate::cli::{parse_cli_args, parse_cli_args_headless, CliAction, CliOutputFormat};
+        use crate::dsp::analyze_cue_sheet;
+        use crate::formatter::export::{export_tracks, format_comparison_text, ExportFormat};
+
+        let cancel = AtomicBool::new(false);
+        let temp_dir = std::env::temp_dir().join("truepeaks_v020_tests");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Build a 10-second stereo 24-bit WAV with two halves:
+        // First 5s: correlated L=R 997 Hz sine + 3 consecutive full-scale clips
+        // Next 5s: anti-correlated L=-R quiet sine (polarity inverted)
+        let image_wav = temp_dir.join("album_image.wav");
+        let sr = 44_100usize;
+        let half = 5 * sr;
+        let mut l = vec![0.0_f64; 2 * half];
+        let mut r = vec![0.0_f64; 2 * half];
+        for i in 0..half {
+            let v = 0.25 * (2.0 * std::f64::consts::PI * 997.0 * (i as f64) / (sr as f64)).sin();
+            l[i] = v;
+            r[i] = v;
+        }
+        // Inject 3 consecutive -1.0 full-scale samples in track 1
+        l[1000] = -1.0;
+        l[1001] = -1.0;
+        l[1002] = -1.0;
+        for i in half..(2 * half) {
+            let v = 0.125 * (2.0 * std::f64::consts::PI * 997.0 * (i as f64) / (sr as f64)).sin();
+            l[i] = v;
+            r[i] = -v;
+        }
+        write_pcm24_stereo_wav(&image_wav, 44_100, &l, &r);
+
+        let cue_path = temp_dir.join("album.cue");
+        std::fs::write(
+            &cue_path,
+            "PERFORMER \"Test Artist\"\nTITLE \"Test Cue Album\"\nFILE \"album_image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"First Cut\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Inverted Cut\"\n    INDEX 01 00:05:00\n",
+        )
+        .unwrap();
+
+        let (album_name, cue_tracks) = analyze_cue_sheet(&cue_path, false, &cancel).unwrap();
+        assert_eq!(album_name, "Test Cue Album");
+        assert_eq!(cue_tracks.len(), 2);
+        assert_eq!(cue_tracks[0].display_name(true), "01 - First Cut");
+        assert_eq!(
+            crate::formatter::format_log_track_name(
+                "He\u{0301}le\u{0300}ne Cle\u{0301}ment",
+                &crate::config::LogFilenameOptions::default(),
+            ),
+            "H\u{00E9}l\u{00E8}ne Cl\u{00E9}ment"
+        );
+        assert_eq!(cue_tracks[0].tpl_oversample_factor, 4);
+        assert!(cue_tracks[0].stereo_correlation.unwrap() > 0.99);
+        assert!(cue_tracks[1].stereo_correlation.unwrap() < -0.99);
+        assert!(cue_tracks[0].replay_gain_track_db.is_some());
+        assert!(!cue_tracks[0].timeline.is_empty());
+
+        let cfg = AppConfig::default();
+        let csv = export_tracks(
+            &album_name,
+            &cue_tracks,
+            ExportFormat::Csv,
+            &cfg.log_filenames,
+            true,
+            cfg.surround_folder_mode,
+        );
+        assert!(csv.contains("Track,Format,SampleRateHz"));
+        assert!(csv.contains("01 - First Cut"));
+
+        let md = export_tracks(
+            &album_name,
+            &cue_tracks,
+            ExportFormat::Markdown,
+            &cfg.log_filenames,
+            true,
+            cfg.surround_folder_mode,
+        );
+        assert!(md.contains("| # | Track |"));
+
+        let json = export_tracks(
+            &album_name,
+            &cue_tracks,
+            ExportFormat::Json,
+            &cfg.log_filenames,
+            true,
+            cfg.surround_folder_mode,
+        );
+        assert!(json.contains("\"album_dr\":"));
+        assert!(json.contains("\"stereo_correlation\":"));
+
+        let cmp = format_comparison_text(
+            "Orig",
+            &cue_tracks[0..1],
+            "Remaster",
+            &cue_tracks[1..2],
+            &cfg.log_filenames,
+            true,
+        );
+        assert!(cmp.contains("A/B Mastering Comparison:"));
+
+        // CLI parser: GUI open-with vs headless JSON
+        match parse_cli_args(&[cue_path.to_string_lossy().into_owned()], &cfg) {
+            CliAction::LaunchGui(Some(_)) => {}
+            other => panic!("Expected LaunchGui(Some), got {:?}", other),
+        }
+        match parse_cli_args_headless(&[cue_path.to_string_lossy().into_owned()], &cfg) {
+            CliAction::RunHeadless {
+                format: CliOutputFormat::Text,
+                ..
+            } => {}
+            other => panic!("Expected standalone CLI RunHeadless(Text), got {:?}", other),
+        }
+        match parse_cli_args_headless(&[], &cfg) {
+            CliAction::PrintAndExit(0, msg) => assert!(msg.contains("truepeaks-cli")),
+            other => panic!("Expected standalone CLI help text, got {:?}", other),
+        }
+        match parse_cli_args_headless(&["--help-json".into()], &cfg) {
+            CliAction::PrintAndExit(0, msg) => {
+                assert!(msg.contains("\"folder_columns\":"));
+                assert!(msg.contains("\"config_persistence\":"));
+            }
+            other => panic!("Expected --help-json schema output, got {:?}", other),
+        }
+        match parse_cli_args_headless(&["--longhelp".into()], &cfg) {
+            CliAction::PrintAndExit(0, msg) => {
+                assert!(msg.contains("Detailed CLI Reference (--longhelp)"));
+                assert!(msg.contains("replay_gain_track"));
+            }
+            other => panic!("Expected --longhelp manual output, got {:?}", other),
+        }
+        match parse_cli_args_headless(
+            &[
+                "--no-config".into(),
+                "--style=json".into(),
+                "--columns".into(),
+                "file_name,dr,lufsi,tpl".into(),
+                "--single-rows=max_tpl,lufsi,replay_gain".into(),
+                "--lfe".into(),
+                "--no-progress".into(),
+                "--set=folder_log_pattern={album_dr}_out.txt".into(),
+                cue_path.to_string_lossy().into_owned(),
+            ],
+            &cfg,
+        ) {
+            CliAction::RunHeadless {
+                config: ov,
+                show_progress,
+                ..
+            } => {
+                assert!(!show_progress);
+                assert_eq!(ov.folder_log_style, crate::config::FolderLogStyle::Json);
+                assert!(ov.include_lfe_in_dr);
+                assert_eq!(ov.folder_log_pattern, "{album_dr}_out.txt");
+                assert!(ov.single_rows.replay_gain && !ov.single_rows.rms);
+                assert_eq!(
+                    &ov.folder_columns.active_ordered(),
+                    &[
+                        crate::config::FolderColumnId::FileName,
+                        crate::config::FolderColumnId::DrPmf,
+                        crate::config::FolderColumnId::Lufsi,
+                        crate::config::FolderColumnId::MaxTplItu,
+                    ]
+                );
+            }
+            other => panic!("Expected RunHeadless with overrides, got {:?}", other),
+        }
+        // Invalid --set key must fail cleanly with exit code 2
+        match parse_cli_args_headless(
+            &[
+                "--set=nonexistent_key=true".into(),
+                cue_path.to_string_lossy().into_owned(),
+            ],
+            &cfg,
+        ) {
+            CliAction::PrintAndExit(2, msg) => assert!(msg.contains("Unknown config key")),
+            other => panic!("Expected exit code 2 for bad --set key, got {:?}", other),
+        }
+        match parse_cli_args(
+            &[
+                "--json".into(),
+                "--style".into(),
+                "json".into(),
+                cue_path.to_string_lossy().into_owned(),
+            ],
+            &cfg,
+        ) {
+            CliAction::RunHeadless {
+                format: CliOutputFormat::Json,
+                config: parsed_cfg,
+                ..
+            } => {
+                assert_eq!(parsed_cfg.folder_log_style, crate::config::FolderLogStyle::Json);
+            }
+            other => panic!("Expected RunHeadless(Json), got {:?}", other),
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_recent_popup_layout_heights() {
+        use eframe::egui;
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(980.0, 660.0),
+        ));
+        let mut last_rect = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let _ = ctx.run(raw.clone(), |ctx| {
+                let area_resp = egui::Area::new(egui::Id::new(("recent_scans_area_test", 10usize)))
+                    .kind(egui::UiKind::Popup)
+                    .order(egui::Order::Foreground)
+                    .pivot(egui::Align2::RIGHT_TOP)
+                    .fixed_pos(egui::pos2(950.0, 90.0))
+                    .default_size(egui::Vec2::new(300.0, 288.0))
+                    .constrain(true)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style())
+                            .inner_margin(egui::Margin::same(6.0))
+                            .show(ui, |ui| {
+                                ui.with_layout(
+                                    egui::Layout::top_down_justified(egui::Align::LEFT),
+                                    |ui| {
+                                        ui.set_min_width(240.0);
+                                        ui.set_max_width(440.0);
+                                        for i in 0..10 {
+                                            ui.add(
+                                                egui::Button::new(format!(
+                                                    "Album {} - Very Long Album Title Name Here",
+                                                    i + 1
+                                                ))
+                                                .wrap_mode(egui::TextWrapMode::Truncate)
+                                                .min_size(egui::Vec2::new(228.0, 24.0)),
+                                            );
+                                        }
+                                    },
+                                );
+                            });
+                    });
+                last_rect = area_resp.response.rect;
+            });
+        }
+        assert!(
+            last_rect.height() >= 250.0,
+            "expected >=10-line height, got {:?}",
+            last_rect
+        );
+    }
+
+    #[test]
+    fn test_audit_fixes_pearson_dc_json_multi_and_set_style() {
+        use crate::cli::{parse_cli_args_headless, CliAction};
+        use crate::config::{FolderColumnsConfig, FolderLogStyle};
+        use crate::dsp::stats::TrackStatsAccumulator;
+        use crate::scanner::{spawn_scan_job, ScanEvent, ScanTarget};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        // 1. DC-biased Pearson correlation must remain mean-centered (-1.0 for inverted AC on equal DC)
+        let sr = 44_100usize;
+        let frames = sr / 2;
+        let mut interleaved = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let ac = 0.25 * (2.0 * std::f64::consts::PI * 100.0 * (i as f64) / (sr as f64)).sin();
+            interleaved.push(0.5 + ac);
+            interleaved.push(0.5 - ac);
+        }
+        let mut acc = TrackStatsAccumulator::new(2);
+        acc.process_frames(&interleaved, frames);
+        let stats = acc.finalize(false, 0);
+        let r_lr = stats.stereo_correlation.expect("stereo correlation");
+        assert!(
+            r_lr < -0.99,
+            "Expected mean-centered Pearson r_LR ~ -1.0 under DC offset, got {}",
+            r_lr
+        );
+
+        let temp_dir = std::env::temp_dir().join("truepeaks_audit_multi_json_tests");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let dir_a = temp_dir.join("Album_A");
+        let dir_b = temp_dir.join("Album_B");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        // 2. --set folder_log_style=Json must sync active folder_columns profile
+        let base_cfg = AppConfig::default();
+        match parse_cli_args_headless(
+            &[
+                "--no-config".into(),
+                "--set=folder_log_style=Json".into(),
+                dir_a.to_string_lossy().into_owned(),
+            ],
+            &base_cfg,
+        ) {
+            CliAction::RunHeadless { config, .. } => {
+                assert_eq!(config.folder_log_style, FolderLogStyle::Json);
+                assert_eq!(config.folder_columns, FolderColumnsConfig::json_default());
+            }
+            other => panic!("Expected RunHeadless, got {:?}", other),
+        }
+
+        // 3. Multi-folder JSON scan with combine_dropped_folders=false must produce valid JSON (no [Folder:] banners)
+
+        let len = sr * 2;
+        let mut sine = vec![0.0_f64; len];
+        for (i, s) in sine.iter_mut().enumerate() {
+            *s = 0.3 * (2.0 * std::f64::consts::PI * 440.0 * (i as f64) / (sr as f64)).sin();
+        }
+        write_pcm24_stereo_wav(&dir_a.join("01.wav"), 44_100, &sine, &sine);
+        write_pcm24_stereo_wav(&dir_b.join("01.wav"), 44_100, &sine, &sine);
+
+        let mut json_cfg = AppConfig::default();
+        json_cfg.switch_folder_log_style(FolderLogStyle::Json);
+        json_cfg.combine_dropped_folders = false;
+        json_cfg.save_logs_to_disk = false;
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = crossbeam_channel::unbounded();
+        spawn_scan_job(
+            ScanTarget::Multi {
+                dirs: vec![dir_a, dir_b],
+                files: Vec::new(),
+            },
+            json_cfg.clone(),
+            cancel.clone(),
+            tx,
+        );
+
+        let mut saw_started = false;
+        let mut saw_progress = false;
+        let mut completed_text = None;
+        let mut snapshot_text = None;
+        while let Ok(ev) = rx.recv() {
+            match ev {
+                ScanEvent::Started { total_files, .. } => {
+                    assert_eq!(total_files, 2);
+                    saw_started = true;
+                }
+                ScanEvent::Progress { .. } => {
+                    saw_progress = true;
+                }
+                ScanEvent::Completed {
+                    log_text, snapshot, ..
+                } => {
+                    completed_text = Some(log_text);
+                    snapshot_text = Some(snapshot.render_text(&json_cfg));
+                    break;
+                }
+                ScanEvent::Error(e) => panic!("Unexpected scan error: {}", e),
+                ScanEvent::Cancelled => panic!("Unexpected cancel"),
+            }
+        }
+        assert!(saw_started && saw_progress);
+        let log_txt = completed_text.expect("completed text");
+        let snap_txt = snapshot_text.expect("snapshot text");
+        assert!(log_txt.trim().starts_with('{') && log_txt.trim().ends_with('}'));
+        assert!(!log_txt.contains("[Folder:"));
+        assert_eq!(log_txt, snap_txt);
+
+        // 4. --set save_logs_to_disk=true must be preserved in CLI mode
+        match parse_cli_args_headless(
+            &[
+                "--no-config".into(),
+                "--set=save_logs_to_disk=true".into(),
+                temp_dir.join("Album_A").to_string_lossy().into_owned(),
+            ],
+            &base_cfg,
+        ) {
+            CliAction::RunHeadless { config, .. } => assert!(config.save_logs_to_disk),
+            other => panic!("Expected RunHeadless, got {:?}", other),
+        }
+
+        // 5. Pattern expansion must sanitize invalid filename characters from folder/track titles
+        assert_eq!(
+            crate::formatter::expand_filename_pattern(
+                "{folder_name}_DR.txt",
+                "Act I: Live / 2026",
+                None,
+                None,
+                Some(12),
+            ),
+            "Act I_ Live _ 2026_DR.txt"
+        );
+
+        // 6. Non-uniform-block track RMS must match exact sample-weighted AES17 power (2/N sum x^2)
+        let non_uniform_wav = temp_dir.join("non_uniform_rms.wav");
+        let sr_f = 44_100usize;
+        let full_blk = 132_480usize; // 1 full PMF block at amp 1.0 (minus tiny backoff -> 0 dBFS AES17 RMS)
+        let tail = 4_410usize; // 0.1s near-silent tail
+        let mut nu_sig = Vec::with_capacity(full_blk + tail);
+        for i in 0..full_blk {
+            nu_sig.push(0.5 * (2.0 * std::f64::consts::PI * 997.0 * (i as f64) / (sr_f as f64)).sin());
+        }
+        nu_sig.resize(full_blk + tail, 0.0);
+        write_pcm24_stereo_wav(&non_uniform_wav, 44_100, &nu_sig, &nu_sig);
+        let nu_track = analyze_file(&non_uniform_wav, false, &cancel).unwrap();
+        let expected_rms_db = 10.0
+            * (2.0 * nu_sig.iter().map(|&x| x * x).sum::<f64>() / (nu_sig.len() as f64)).log10();
+        assert!(
+            (nu_track.rms_channels[0] - expected_rms_db).abs() < 0.01,
+            "Sample-weighted AES17 RMS mismatch: got {}, expected {}",
+            nu_track.rms_channels[0],
+            expected_rms_db
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 

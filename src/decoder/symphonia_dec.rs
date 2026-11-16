@@ -1,6 +1,6 @@
 use crate::decoder::{
-    default_channel_layout, AudioStreamMetadata, ChunkedDecoder, DecodeError, SpeakerChannel,
-    CHUNK_FRAMES,
+    default_channel_layout, AudioStreamMetadata, AudioTags, ChunkedDecoder, DecodeError,
+    SpeakerChannel, CHUNK_FRAMES,
 };
 use std::fs::File;
 use std::path::Path;
@@ -13,8 +13,9 @@ use symphonia::core::codecs::{
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataOptions, StandardTagKey};
 use symphonia::core::probe::Hint;
+use unicode_normalization::UnicodeNormalization;
 
 pub struct SymphoniaDecoder {
     format: Box<dyn FormatReader>,
@@ -54,7 +55,7 @@ impl SymphoniaDecoder {
             }
         }
 
-        let probed = symphonia::default::get_probe()
+        let mut probed = symphonia::default::get_probe()
             .format(
                 &hint,
                 mss,
@@ -62,6 +63,54 @@ impl SymphoniaDecoder {
                 &MetadataOptions::default(),
             )
             .map_err(|e| DecodeError::Format(format!("Unsupported container: {}", e)))?;
+
+        let mut extracted_tags = AudioTags::default();
+        let mut collect_tags = |meta_rev: &symphonia::core::meta::MetadataRevision| {
+            for tag in meta_rev.tags() {
+                if let Some(std_key) = tag.std_key {
+                    let val = tag.value.to_string().trim().nfc().collect::<String>();
+                    if val.is_empty() {
+                        continue;
+                    }
+                    match std_key {
+                        StandardTagKey::TrackTitle if extracted_tags.title.is_none() => {
+                            extracted_tags.title = Some(val);
+                        }
+                        StandardTagKey::Artist | StandardTagKey::AlbumArtist
+                            if extracted_tags.artist.is_none() =>
+                        {
+                            extracted_tags.artist = Some(val);
+                        }
+                        StandardTagKey::Album if extracted_tags.album.is_none() => {
+                            extracted_tags.album = Some(val);
+                        }
+                        StandardTagKey::TrackNumber if extracted_tags.track_number.is_none() => {
+                            let num_part = val.split('/').next().unwrap_or(&val).trim();
+                            extracted_tags.track_number = num_part.parse::<u32>().ok();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        };
+
+        if let Some(rev) = probed.format.metadata().current() {
+            collect_tags(rev);
+        }
+        if let Some(container_meta) = probed.metadata.get() {
+            if let Some(rev) = container_meta.current() {
+                collect_tags(rev);
+            }
+        }
+        let tags = if extracted_tags.title.is_some()
+            || extracted_tags.artist.is_some()
+            || extracted_tags.album.is_some()
+            || extracted_tags.track_number.is_some()
+        {
+            Some(extracted_tags)
+        } else {
+            None
+        };
 
         let format = probed.format;
         let track = format
@@ -98,6 +147,7 @@ impl SymphoniaDecoder {
                 word_length,
                 is_lossless_integer,
                 total_frames,
+                tags,
             },
             overflow_interleaved: Vec::new(),
             overflow_frame_offset: 0,

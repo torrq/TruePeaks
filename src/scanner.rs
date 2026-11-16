@@ -1,9 +1,10 @@
 use crate::config::AppConfig;
+use crate::decoder::cue::is_cue_file;
 use crate::decoder::{is_supported_audio_file, DecodeError};
-use crate::dsp::{analyze_file, TrackAnalysis};
+use crate::dsp::{analyze_cue_sheet, analyze_file, TrackAnalysis};
 use crate::formatter::folder_log::{
-    compute_official_album_dr, format_combined_multi_log, format_folder_log,
-    format_recursive_folder_log, FolderTreeNode,
+    compute_official_album_dr, format_combined_multi_log_ex, format_folder_log_ex,
+    format_recursive_folder_log_ex, FolderTreeNode,
 };
 use crate::formatter::single_log::format_single_file_log;
 use crate::formatter::{expand_filename_pattern, folder_display_name, write_log_file};
@@ -26,6 +27,159 @@ pub enum ScanTarget {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum ScanSnapshot {
+    SingleFile {
+        path: PathBuf,
+        track: TrackAnalysis,
+    },
+    CueAlbum {
+        cue_path: PathBuf,
+        album_name: String,
+        tracks: Vec<TrackAnalysis>,
+    },
+    Folder {
+        tree: FolderTreeNode,
+    },
+    Multi {
+        roots: Vec<FolderTreeNode>,
+        loose_tracks: Vec<TrackAnalysis>,
+        saved_banners: Vec<String>,
+        combined: bool,
+        label: String,
+    },
+}
+
+impl ScanSnapshot {
+    pub fn title(&self) -> String {
+        match self {
+            ScanSnapshot::SingleFile { track, .. } => track.file_stem.clone(),
+            ScanSnapshot::CueAlbum { album_name, .. } => album_name.clone(),
+            ScanSnapshot::Folder { tree } => tree.display_name.clone(),
+            ScanSnapshot::Multi { label, .. } => label.clone(),
+        }
+    }
+
+    pub fn is_single_track(&self) -> bool {
+        matches!(self, ScanSnapshot::SingleFile { .. })
+    }
+
+    pub fn collect_tracks(&self) -> Vec<&TrackAnalysis> {
+        let mut out = Vec::new();
+        match self {
+            ScanSnapshot::SingleFile { track, .. } => out.push(track),
+            ScanSnapshot::CueAlbum { tracks, .. } => out.extend(tracks.iter()),
+            ScanSnapshot::Folder { tree } => collect_tree_tracks(tree, &mut out),
+            ScanSnapshot::Multi {
+                roots,
+                loose_tracks,
+                ..
+            } => {
+                for r in roots {
+                    collect_tree_tracks(r, &mut out);
+                }
+                out.extend(loose_tracks.iter());
+            }
+        }
+        out
+    }
+
+    pub fn owned_tracks(&self) -> Vec<TrackAnalysis> {
+        self.collect_tracks().into_iter().cloned().collect()
+    }
+
+    pub fn render_text(&self, config: &AppConfig) -> String {
+        match self {
+            ScanSnapshot::SingleFile { track, .. } => {
+                format_single_file_log(track, &config.single_rows, &config.log_filenames)
+            }
+            ScanSnapshot::CueAlbum {
+                album_name,
+                tracks,
+                ..
+            } => format_folder_log_ex(
+                album_name,
+                tracks,
+                config.folder_log_style,
+                &config.folder_columns,
+                &config.log_filenames,
+                config.surround_folder_mode,
+                config.use_embedded_tags,
+            ),
+            ScanSnapshot::Folder { tree } => format_folder_node(tree, config).0,
+            ScanSnapshot::Multi {
+                roots,
+                loose_tracks,
+                saved_banners,
+                combined,
+                ..
+            } => {
+                if *combined
+                    || (config.folder_log_style == crate::config::FolderLogStyle::Json
+                        && roots.len() + loose_tracks.len() > 1)
+                {
+                    format_combined_multi_log_ex(
+                        roots,
+                        loose_tracks,
+                        config.folder_log_style,
+                        &config.folder_columns,
+                        &config.single_rows,
+                        &config.log_filenames,
+                        config.surround_folder_mode,
+                        config.use_embedded_tags,
+                    )
+                } else {
+                    let rule_eq = "=".repeat(80);
+                    let total_sections = roots.len() + loose_tracks.len();
+                    let mut sections = Vec::with_capacity(total_sections);
+                    let mut banner_idx = 0usize;
+
+                    for root in roots {
+                        let (section_log, _) = format_folder_node(root, config);
+                        let banner = saved_banners
+                            .get(banner_idx)
+                            .cloned()
+                            .unwrap_or_else(|| format!("[Folder: {}]", root.display_name));
+                        banner_idx += 1;
+                        if total_sections > 1 {
+                            sections.push(format!("{}\n{}\n{}", banner, rule_eq, section_log));
+                        } else {
+                            sections.push(section_log);
+                        }
+                    }
+                    for track in loose_tracks {
+                        let s_log = format_single_file_log(
+                            track,
+                            &config.single_rows,
+                            &config.log_filenames,
+                        );
+                        let banner = saved_banners
+                            .get(banner_idx)
+                            .cloned()
+                            .unwrap_or_else(|| format!("[File: {}]", track.file_stem));
+                        banner_idx += 1;
+                        if total_sections > 1 {
+                            sections.push(format!("{}\n{}\n{}", banner, rule_eq, s_log));
+                        } else {
+                            sections.push(s_log);
+                        }
+                    }
+                    sections.join("\n\n")
+                }
+            }
+        }
+    }
+}
+
+fn collect_tree_tracks<'a>(node: &'a FolderTreeNode, out: &mut Vec<&'a TrackAnalysis>) {
+    out.extend(node.tracks.iter());
+    for child in &node.children {
+        collect_tree_tracks(child, out);
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum ScanEvent {
     Started {
         total_files: usize,
@@ -38,6 +192,7 @@ pub enum ScanEvent {
     },
     Completed {
         log_text: String,
+        snapshot: ScanSnapshot,
         saved_paths: Vec<PathBuf>,
         elapsed_secs: f64,
         tracks_count: usize,
@@ -167,11 +322,14 @@ fn hydrate_blueprint(
 
 fn run_parallel_analysis(
     file_paths: &[PathBuf],
+    progress_offset: usize,
+    progress_total: usize,
     config: &AppConfig,
     cancel_flag: &Arc<AtomicBool>,
     tx: &Sender<ScanEvent>,
 ) -> Result<Vec<TrackAnalysis>, Option<String>> {
     let total = file_paths.len();
+    let display_total = progress_total.max(progress_offset + total).max(1);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.max_threads.max(1))
         .build()
@@ -189,10 +347,11 @@ fn run_parallel_analysis(
                 }
                 let res = analyze_file(file_path, include_lfe, cancel_flag);
                 if let Ok(ref track) = res {
-                    let done = completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    let done =
+                        progress_offset + completed_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     let _ = tx.send(ScanEvent::Progress {
                         completed: done,
-                        total,
+                        total: display_total,
                         last_file: track.file_stem.clone(),
                     });
                 }
@@ -218,24 +377,35 @@ fn run_parallel_analysis(
 
 fn format_folder_node(node: &FolderTreeNode, config: &AppConfig) -> (String, i32) {
     if config.recurse_subfolders {
-        let txt = format_recursive_folder_log(
+        let txt = format_recursive_folder_log_ex(
             node,
             config.folder_log_style,
             &config.folder_columns,
             &config.log_filenames,
             config.surround_folder_mode,
+            config.use_embedded_tags,
         );
         (txt, node.official_dr())
     } else {
-        let txt = format_folder_log(
-            &node.path,
+        let txt = format_folder_log_ex(
+            &node.display_name,
             &node.tracks,
             config.folder_log_style,
             &config.folder_columns,
             &config.log_filenames,
             config.surround_folder_mode,
+            config.use_embedded_tags,
         );
         (txt, compute_official_album_dr(&node.tracks))
+    }
+}
+
+fn target_output_dir(default_dir: &Path, config: &AppConfig) -> PathBuf {
+    let custom = config.custom_output_dir.trim();
+    if custom.is_empty() {
+        default_dir.to_path_buf()
+    } else {
+        PathBuf::from(custom)
     }
 }
 
@@ -254,7 +424,8 @@ fn save_single_track_log(
         Some(&track.file_format),
         Some(track.dr_track_rounded),
     );
-    let out_path = parent_dir.join(out_filename);
+    let dest_dir = target_output_dir(parent_dir, config);
+    let out_path = dest_dir.join(out_filename);
     write_log_file(
         &out_path,
         log_text,
@@ -278,7 +449,8 @@ fn save_folder_log(
         None,
         album_dr,
     );
-    let out_path = dir.join(out_filename);
+    let dest_dir = target_output_dir(dir, config);
+    let out_path = dest_dir.join(out_filename);
     write_log_file(
         &out_path,
         log_text,
@@ -346,6 +518,60 @@ fn run_single_file_scan(
         .unwrap_or("File")
         .to_string();
 
+    if is_cue_file(path) {
+        let _ = tx.send(ScanEvent::Started {
+            total_files: 1,
+            target_label: label,
+        });
+        match analyze_cue_sheet(path, config.include_lfe_in_dr, cancel_flag) {
+            Ok((album_name, tracks)) => {
+                let count = tracks.len();
+                let _ = tx.send(ScanEvent::Progress {
+                    completed: 1,
+                    total: 1,
+                    last_file: album_name.clone(),
+                });
+                let album_dr = compute_official_album_dr(&tracks);
+                let snapshot = ScanSnapshot::CueAlbum {
+                    cue_path: path.to_path_buf(),
+                    album_name: album_name.clone(),
+                    tracks,
+                };
+                let log_text = snapshot.render_text(config);
+                let mut saved_paths = Vec::new();
+                if config.save_logs_to_disk {
+                    let cue_dir = path.parent().unwrap_or_else(|| Path::new("."));
+                    match save_folder_log(cue_dir, &album_name, Some(album_dr), &log_text, config) {
+                        Ok(out_path) => saved_paths.push(out_path),
+                        Err(e) => {
+                            let _ = tx.send(ScanEvent::Error(e));
+                            return;
+                        }
+                    }
+                }
+                let _ = tx.send(ScanEvent::Completed {
+                    log_text,
+                    snapshot,
+                    saved_paths,
+                    elapsed_secs: start_time.elapsed().as_secs_f64(),
+                    tracks_count: count,
+                    folders_count: 1,
+                });
+            }
+            Err(DecodeError::Cancelled) => {
+                let _ = tx.send(ScanEvent::Cancelled);
+            }
+            Err(e) => {
+                let _ = tx.send(ScanEvent::Error(format!(
+                    "Failed to analyze CUE sheet {:?}: {}",
+                    path.file_name().unwrap_or_default(),
+                    e
+                )));
+            }
+        }
+        return;
+    }
+
     let _ = tx.send(ScanEvent::Started {
         total_files: 1,
         target_label: label,
@@ -377,8 +603,13 @@ fn run_single_file_scan(
                 }
             }
 
+            let snapshot = ScanSnapshot::SingleFile {
+                path: path.to_path_buf(),
+                track,
+            };
             let _ = tx.send(ScanEvent::Completed {
                 log_text,
+                snapshot,
                 saved_paths,
                 elapsed_secs: start_time.elapsed().as_secs_f64(),
                 tracks_count: 1,
@@ -432,7 +663,7 @@ fn run_folder_scan(
         target_label: folder_name.clone(),
     });
 
-    let tracks = match run_parallel_analysis(&all_paths, config, cancel_flag, tx) {
+    let tracks = match run_parallel_analysis(&all_paths, 0, total, config, cancel_flag, tx) {
         Ok(t) => t,
         Err(None) => {
             let _ = tx.send(ScanEvent::Cancelled);
@@ -459,8 +690,10 @@ fn run_folder_scan(
         }
     }
 
+    let snapshot = ScanSnapshot::Folder { tree: root };
     let _ = tx.send(ScanEvent::Completed {
         log_text,
+        snapshot,
         saved_paths,
         elapsed_secs: start_time.elapsed().as_secs_f64(),
         tracks_count: total,
@@ -488,8 +721,17 @@ fn run_multi_scan(
         }
     }
 
-    let mut sorted_files = files.to_vec();
+    let mut cue_files = Vec::new();
+    let mut sorted_files = Vec::new();
+    for f in files {
+        if is_cue_file(f) {
+            cue_files.push(f.clone());
+        } else {
+            sorted_files.push(f.clone());
+        }
+    }
     sort_paths_by_name(&mut sorted_files);
+    sort_paths_by_name(&mut cue_files);
 
     let mut all_paths = Vec::new();
     for bp in &blueprints {
@@ -497,15 +739,15 @@ fn run_multi_scan(
     }
     all_paths.extend(sorted_files.iter().cloned());
 
-    if all_paths.is_empty() {
+    if all_paths.is_empty() && cue_files.is_empty() {
         let _ = tx.send(ScanEvent::Error(
             "No supported audio files found in the dropped items.".to_string(),
         ));
         return;
     }
 
-    let total = all_paths.len();
-    let folders_count = blueprints.len();
+    let progress_total = (all_paths.len() + cue_files.len()).max(1);
+    let folders_count = blueprints.len() + cue_files.len();
     let label = if config.combine_dropped_folders {
         format!("Combined ({} folders)", folders_count)
     } else if folders_count > 0 {
@@ -515,32 +757,75 @@ fn run_multi_scan(
     };
 
     let _ = tx.send(ScanEvent::Started {
-        total_files: total,
-        target_label: label,
+        total_files: progress_total,
+        target_label: label.clone(),
     });
 
-    let analyzed = match run_parallel_analysis(&all_paths, config, cancel_flag, tx) {
-        Ok(t) => t,
-        Err(None) => {
-            let _ = tx.send(ScanEvent::Cancelled);
-            return;
+    // Expand any dropped .cue sheets into synthetic FolderTreeNode entries
+    let mut cue_nodes = Vec::new();
+    for (idx, cue) in cue_files.iter().enumerate() {
+        match analyze_cue_sheet(cue, config.include_lfe_in_dr, cancel_flag) {
+            Ok((album_name, tracks)) => {
+                let _ = tx.send(ScanEvent::Progress {
+                    completed: idx + 1,
+                    total: progress_total,
+                    last_file: album_name.clone(),
+                });
+                cue_nodes.push(FolderTreeNode {
+                    path: cue.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(),
+                    display_name: album_name,
+                    tracks,
+                    children: Vec::new(),
+                });
+            }
+            Err(DecodeError::Cancelled) => {
+                let _ = tx.send(ScanEvent::Cancelled);
+                return;
+            }
+            Err(e) => {
+                let _ = tx.send(ScanEvent::Error(e.to_string()));
+                return;
+            }
         }
-        Err(Some(e)) => {
-            let _ = tx.send(ScanEvent::Error(e));
-            return;
+    }
+
+    let total = all_paths.len() + cue_nodes.iter().map(|n| n.tracks.len()).sum::<usize>();
+
+    let analyzed = if all_paths.is_empty() {
+        Vec::new()
+    } else {
+        match run_parallel_analysis(
+            &all_paths,
+            cue_files.len(),
+            progress_total,
+            config,
+            cancel_flag,
+            tx,
+        ) {
+            Ok(t) => t,
+            Err(None) => {
+                let _ = tx.send(ScanEvent::Cancelled);
+                return;
+            }
+            Err(Some(e)) => {
+                let _ = tx.send(ScanEvent::Error(e));
+                return;
+            }
         }
     };
 
     let mut iter = analyzed.into_iter();
-    let roots: Vec<FolderTreeNode> = blueprints
+    let mut roots: Vec<FolderTreeNode> = blueprints
         .into_iter()
         .map(|bp| hydrate_blueprint(bp, &mut iter))
         .collect();
+    roots.extend(cue_nodes);
     let loose_tracks: Vec<TrackAnalysis> = iter.collect();
 
     let mut saved_paths = Vec::new();
+    let mut saved_banners = Vec::new();
     let log_text = if config.combine_dropped_folders {
-        let combined = format_combined_multi_log(
+        let combined = format_combined_multi_log_ex(
             &roots,
             &loose_tracks,
             config.folder_log_style,
@@ -548,12 +833,13 @@ fn run_multi_scan(
             &config.single_rows,
             &config.log_filenames,
             config.surround_folder_mode,
+            config.use_embedded_tags,
         );
 
         if config.save_logs_to_disk {
             let sum_dr: f64 = roots.iter().map(|r| r.sum_dr_raw()).sum::<f64>()
                 + loose_tracks.iter().map(|t| t.dr_track_raw).sum::<f64>();
-            let overall_dr = (sum_dr / (total as f64)).round() as i32;
+            let overall_dr = (sum_dr / (total.max(1) as f64)).round() as i32;
 
             if let Some(save_dir) = common_save_directory(&roots, &sorted_files) {
                 let save_name = folder_display_name(&save_dir, "Combined");
@@ -594,6 +880,7 @@ fn run_multi_scan(
                     }
                 }
             }
+            saved_banners.push(banner.clone());
 
             if roots.len() + loose_tracks.len() > 1 {
                 sections.push(format!("{}\n{}\n{}", banner, rule_eq, section_log));
@@ -618,6 +905,7 @@ fn run_multi_scan(
                     }
                 }
             }
+            saved_banners.push(banner.clone());
 
             if roots.len() + loose_tracks.len() > 1 {
                 sections.push(format!("{}\n{}\n{}", banner, rule_eq, s_log));
@@ -626,11 +914,35 @@ fn run_multi_scan(
             }
         }
 
-        sections.join("\n\n")
+        if config.folder_log_style == crate::config::FolderLogStyle::Json
+            && roots.len() + loose_tracks.len() > 1
+        {
+            format_combined_multi_log_ex(
+                &roots,
+                &loose_tracks,
+                config.folder_log_style,
+                &config.folder_columns,
+                &config.single_rows,
+                &config.log_filenames,
+                config.surround_folder_mode,
+                config.use_embedded_tags,
+            )
+        } else {
+            sections.join("\n\n")
+        }
+    };
+
+    let snapshot = ScanSnapshot::Multi {
+        roots,
+        loose_tracks,
+        saved_banners,
+        combined: config.combine_dropped_folders,
+        label,
     };
 
     let _ = tx.send(ScanEvent::Completed {
         log_text,
+        snapshot,
         saved_paths,
         elapsed_secs: start_time.elapsed().as_secs_f64(),
         tracks_count: total,

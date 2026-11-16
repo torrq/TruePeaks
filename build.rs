@@ -23,7 +23,7 @@ fn main() {
     fs::write(&res_path, res_bytes)
         .unwrap_or_else(|e| panic!("failed to write {}: {}", res_path.display(), e));
 
-    println!("cargo:rustc-link-arg-bins={}", res_path.display());
+    println!("cargo:rustc-link-arg-bin=truepeaks={}", res_path.display());
 }
 
 /// Converts a standard `.ico` file into a 32-bit Windows PE `.res` resource stream
@@ -100,7 +100,7 @@ fn write_res_record(
     out.extend_from_slice(&0u32.to_le_bytes()); // Version
     out.extend_from_slice(&0u32.to_le_bytes()); // Characteristics
     out.extend_from_slice(data);
-    while out.len() % 4 != 0 {
+    while !out.len().is_multiple_of(4) {
         out.push(0);
     }
 }

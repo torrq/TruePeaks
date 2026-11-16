@@ -16,12 +16,11 @@ pub struct DrPmfResults {
     pub channel_dr: Vec<f64>,
     pub track_dr_raw: f64,
     pub track_dr_rounded: i32,
-    pub aes17_rms_channels_db: Vec<f64>,
 }
 
 pub fn pmf_block_frames(sample_rate: u32) -> usize {
     let sr = sample_rate as usize;
-    if sr > 0 && sr % 44_100 == 0 {
+    if sr > 0 && sr.is_multiple_of(44_100) {
         let mult = sr / 44_100;
         3 * (sr + 60 * mult)
     } else {
@@ -92,7 +91,6 @@ impl DrPmfAccumulator {
         }
 
         let mut channel_dr = Vec::with_capacity(self.num_channels);
-        let mut aes17_rms_channels_db = Vec::with_capacity(self.num_channels);
 
         for c in 0..self.num_channels {
             let mut rms_sq_list = self.block_rms_sq[c].clone();
@@ -100,18 +98,8 @@ impl DrPmfAccumulator {
             let k = rms_sq_list.len();
             if k == 0 {
                 channel_dr.push(0.0);
-                aes17_rms_channels_db.push(f64::NEG_INFINITY);
                 continue;
             }
-
-            // Whole-track AES17 RMS is the quadratic mean across all K PMF blocks
-            let mean_all_rms_sq: f64 = rms_sq_list.iter().sum::<f64>() / (k as f64);
-            let rms_db = if mean_all_rms_sq > 0.0 {
-                10.0 * mean_all_rms_sq.log10()
-            } else {
-                f64::NEG_INFINITY
-            };
-            aes17_rms_channels_db.push(rms_db);
 
             rms_sq_list.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
             peaks_list.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
@@ -160,7 +148,6 @@ impl DrPmfAccumulator {
             channel_dr,
             track_dr_raw,
             track_dr_rounded,
-            aes17_rms_channels_db,
         }
     }
 }

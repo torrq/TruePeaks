@@ -1,7 +1,7 @@
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CharsetMode {
@@ -80,17 +80,13 @@ impl SurroundFolderMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FolderLogStyle {
+    #[default]
     TruePeaksTable,
     ClassicFooDr,
     CompactMastering,
-}
-
-impl Default for FolderLogStyle {
-    fn default() -> Self {
-        Self::TruePeaksTable
-    }
+    Json,
 }
 
 impl FolderLogStyle {
@@ -99,6 +95,7 @@ impl FolderLogStyle {
             FolderLogStyle::TruePeaksTable => "TruePeaks Table (Default)",
             FolderLogStyle::ClassicFooDr => "Classic DR (foo_dr Style)",
             FolderLogStyle::CompactMastering => "Compact Mastering",
+            FolderLogStyle::Json => "JSON",
         }
     }
 
@@ -113,6 +110,9 @@ impl FolderLogStyle {
             FolderLogStyle::CompactMastering => {
                 "Concise album summary header with tight space-aligned mastering columns and customizable fields."
             }
+            FolderLogStyle::Json => {
+                "Machine-readable structured JSON report with album metadata and customizable per-track metrics for scripts and automation."
+            }
         }
     }
 
@@ -121,6 +121,7 @@ impl FolderLogStyle {
             FolderLogStyle::TruePeaksTable,
             FolderLogStyle::ClassicFooDr,
             FolderLogStyle::CompactMastering,
+            FolderLogStyle::Json,
         ]
     }
 }
@@ -165,13 +166,16 @@ pub enum FolderColumnId {
     RmsLeft,
     RmsRight,
 
-    // Group 7: Ratios
+    // Group 7: Ratios & Diagnostics
     Plr,
     MinPsr,
+    ReplayGainTrack,
+    StereoCorrelation,
+    TplOversample,
 }
 
 impl FolderColumnId {
-    pub const ALL: [FolderColumnId; 28] = [
+    pub const ALL: [FolderColumnId; 31] = [
         FolderColumnId::FileName,
         FolderColumnId::Duration,
         FolderColumnId::FileFormat,
@@ -200,6 +204,9 @@ impl FolderColumnId {
         FolderColumnId::RmsRight,
         FolderColumnId::Plr,
         FolderColumnId::MinPsr,
+        FolderColumnId::ReplayGainTrack,
+        FolderColumnId::StereoCorrelation,
+        FolderColumnId::TplOversample,
     ];
 
     pub fn default_order() -> Vec<FolderColumnId> {
@@ -251,6 +258,9 @@ impl FolderColumnId {
             FolderColumnId::RmsRight => "RMS RIGHT",
             FolderColumnId::Plr => "PLR (AES)",
             FolderColumnId::MinPsr => "Min. PSR (AES)",
+            FolderColumnId::ReplayGainTrack => "ReplayGain (-18)",
+            FolderColumnId::StereoCorrelation => "Stereo Corr.",
+            FolderColumnId::TplOversample => "TPL Oversample",
         }
     }
 
@@ -263,7 +273,7 @@ impl FolderColumnId {
 
     pub fn tooltip(self) -> &'static str {
         match self {
-            FolderColumnId::FileName => "Source audio filename stem.",
+            FolderColumnId::FileName => "Source audio filename stem (or embedded track title when tags are enabled).",
             FolderColumnId::Duration => "Track duration formatted as M:SS (or H:MM:SS).",
             FolderColumnId::FileFormat => "Audio container/codec extension (for example .flac, .wav, .mp3).",
             FolderColumnId::SampleRate => "Sample rate in kHz (for example 44.1k, 48k, 96k, 192k).",
@@ -272,9 +282,9 @@ impl FolderColumnId {
             FolderColumnId::DrPmf => "Rounded integer Pleasurize Music Foundation DR score averaged across active channels.",
             FolderColumnId::DrLeft => "Unrounded left-channel PMF DR (2nd-highest 3 s block peak minus top-20% RMS).",
             FolderColumnId::DrRight => "Unrounded right-channel PMF DR (2nd-highest 3 s block peak minus top-20% RMS).",
-            FolderColumnId::MaxTplItu => "Highest 4x oversampled ITU-R BS.1770-4 True Peak across all channels (dBTP).",
-            FolderColumnId::MaxTplLeft => "Left-channel 4x oversampled ITU-R BS.1770-4 True Peak (dBTP).",
-            FolderColumnId::MaxTplRight => "Right-channel 4x oversampled ITU-R BS.1770-4 True Peak (dBTP).",
+            FolderColumnId::MaxTplItu => "Highest oversampled ITU-R BS.1770-4 True Peak across all channels (dBTP).",
+            FolderColumnId::MaxTplLeft => "Left-channel oversampled ITU-R BS.1770-4 True Peak (dBTP).",
+            FolderColumnId::MaxTplRight => "Right-channel oversampled ITU-R BS.1770-4 True Peak (dBTP).",
             FolderColumnId::Lufsi => "Gated whole-track Integrated Loudness in LUFS per ITU-R BS.1770-4 / EBU R128.",
             FolderColumnId::Lra => "Loudness Range in LU measuring macro-dynamic spread across gated Short-Term windows.",
             FolderColumnId::MaxMomItu => "Peak continuous sample-sliding 400 ms Momentary Loudness across joint weighted channels.",
@@ -287,25 +297,103 @@ impl FolderColumnId {
             FolderColumnId::MaxSppmLeft => "Left-channel raw digital Sample Peak magnitude (dBFS).",
             FolderColumnId::MaxSppmRight => "Right-channel raw digital Sample Peak magnitude (dBFS).",
             FolderColumnId::RmsJoint => "Combined multi-channel AES17 sine-normalized RMS power level (dBFS).",
-            FolderColumnId::RmsLeft => "Left-channel AES17 sine-normalized RMS over 3 s PMF blocks (dBFS).",
-            FolderColumnId::RmsRight => "Right-channel AES17 sine-normalized RMS over 3 s PMF blocks (dBFS).",
+            FolderColumnId::RmsLeft => "Left-channel AES17 sine-normalized RMS across the track (dBFS).",
+            FolderColumnId::RmsRight => "Right-channel AES17 sine-normalized RMS across the track (dBFS).",
             FolderColumnId::Plr => "Peak-to-Integrated-Loudness Ratio in LU (reference peak minus LUFSi).",
             FolderColumnId::MinPsr => "Lowest continuous 3.0 s Sample-Peak-to-Short-Term-Loudness ratio (highlights over-compressed sections).",
+            FolderColumnId::ReplayGainTrack => "ReplayGain 2.0 track normalization offset in dB relative to -18.0 LUFS (-18.0 - LUFSi).",
+            FolderColumnId::StereoCorrelation => "Pearson zero-lag correlation r in [-1.00, +1.00] between Front Left and Front Right channels.",
+            FolderColumnId::TplOversample => "ITU-R BS.1770-4 True Peak polyphase oversampling factor (4x < 96 kHz, 2x < 192 kHz, 1x >= 192 kHz).",
+        }
+    }
+
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            FolderColumnId::FileName => "file_name",
+            FolderColumnId::Duration => "duration",
+            FolderColumnId::FileFormat => "file_format",
+            FolderColumnId::SampleRate => "sample_rate",
+            FolderColumnId::WordLength => "word_length",
+            FolderColumnId::BitsUsed => "bits_used",
+            FolderColumnId::DrPmf => "dr_pmf",
+            FolderColumnId::DrLeft => "dr_left",
+            FolderColumnId::DrRight => "dr_right",
+            FolderColumnId::MaxTplItu => "max_tpl_itu",
+            FolderColumnId::MaxTplLeft => "max_tpl_left",
+            FolderColumnId::MaxTplRight => "max_tpl_right",
+            FolderColumnId::Lufsi => "lufsi",
+            FolderColumnId::Lra => "lra",
+            FolderColumnId::MaxMomItu => "max_mom_itu",
+            FolderColumnId::MaxShortTermItu => "max_short_term_itu",
+            FolderColumnId::MaxMomLeft => "max_mom_left",
+            FolderColumnId::MaxMomRight => "max_mom_right",
+            FolderColumnId::MaxShortTermLeft => "max_short_term_left",
+            FolderColumnId::MaxShortTermRight => "max_short_term_right",
+            FolderColumnId::MaxSppmJoint => "max_sppm_joint",
+            FolderColumnId::MaxSppmLeft => "max_sppm_left",
+            FolderColumnId::MaxSppmRight => "max_sppm_right",
+            FolderColumnId::RmsJoint => "rms_joint",
+            FolderColumnId::RmsLeft => "rms_left",
+            FolderColumnId::RmsRight => "rms_right",
+            FolderColumnId::Plr => "plr",
+            FolderColumnId::MinPsr => "min_psr",
+            FolderColumnId::ReplayGainTrack => "replay_gain_track",
+            FolderColumnId::StereoCorrelation => "stereo_correlation",
+            FolderColumnId::TplOversample => "tpl_oversample",
+        }
+    }
+
+    pub fn from_cli_name(raw: &str) -> Option<Self> {
+        let norm: String = raw
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        match norm.as_str() {
+            "filename" | "track" | "name" => Some(Self::FileName),
+            "duration" | "time" => Some(Self::Duration),
+            "fileformat" | "format" | "ext" | "codec" => Some(Self::FileFormat),
+            "samplerate" | "sr" => Some(Self::SampleRate),
+            "wordlength" | "bits" => Some(Self::WordLength),
+            "bitsused" => Some(Self::BitsUsed),
+            "drpmf" | "dr" => Some(Self::DrPmf),
+            "drleft" | "drl" => Some(Self::DrLeft),
+            "drright" | "drr" => Some(Self::DrRight),
+            "maxtplitu" | "maxtpl" | "tpl" => Some(Self::MaxTplItu),
+            "maxtplleft" | "tplleft" => Some(Self::MaxTplLeft),
+            "maxtplright" | "tplright" => Some(Self::MaxTplRight),
+            "lufsi" | "lufs" | "integrated" => Some(Self::Lufsi),
+            "lra" => Some(Self::Lra),
+            "maxmomitu" | "maxmom" | "mom" => Some(Self::MaxMomItu),
+            "maxshorttermitu" | "maxshortterm" | "shortterm" | "st" => Some(Self::MaxShortTermItu),
+            "maxmomleft" | "momleft" => Some(Self::MaxMomLeft),
+            "maxmomright" | "momright" => Some(Self::MaxMomRight),
+            "maxshorttermleft" | "stleft" => Some(Self::MaxShortTermLeft),
+            "maxshorttermright" | "stright" => Some(Self::MaxShortTermRight),
+            "maxsppmjoint" | "maxsppm" | "sppm" | "peak" => Some(Self::MaxSppmJoint),
+            "maxsppmleft" | "sppmleft" => Some(Self::MaxSppmLeft),
+            "maxsppmright" | "sppmright" => Some(Self::MaxSppmRight),
+            "rmsjoint" | "rms" => Some(Self::RmsJoint),
+            "rmsleft" | "rmsl" => Some(Self::RmsLeft),
+            "rmsright" | "rmsr" => Some(Self::RmsRight),
+            "plr" => Some(Self::Plr),
+            "minpsr" | "psr" => Some(Self::MinPsr),
+            "replaygaintrack" | "replaygain" | "rg" => Some(Self::ReplayGainTrack),
+            "stereocorrelation" | "stereocorr" | "corr" | "correlation" => {
+                Some(Self::StereoCorrelation)
+            }
+            "tploversample" | "tplos" | "oversample" => Some(Self::TplOversample),
+            _ => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
+    #[default]
     System,
     Dark,
     Light,
-}
-
-impl Default for ThemeMode {
-    fn default() -> Self {
-        Self::System
-    }
 }
 
 impl ThemeMode {
@@ -327,6 +415,26 @@ impl ThemeMode {
 
     pub fn all() -> &'static [ThemeMode] {
         &[ThemeMode::System, ThemeMode::Dark, ThemeMode::Light]
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DefaultResultsView {
+    #[default]
+    VisualView,
+    TextLog,
+}
+
+impl DefaultResultsView {
+    pub fn label(self) -> &'static str {
+        match self {
+            DefaultResultsView::VisualView => "Visual View",
+            DefaultResultsView::TextLog => "Text Log",
+        }
+    }
+
+    pub fn all() -> &'static [DefaultResultsView] {
+        &[DefaultResultsView::VisualView, DefaultResultsView::TextLog]
     }
 }
 
@@ -371,9 +479,12 @@ pub struct FolderColumnsConfig {
     pub rms_left: bool,
     pub rms_right: bool,
 
-    // Group 7: Ratios
+    // Group 7: Ratios & Diagnostics
     pub plr: bool,
     pub min_psr: bool,
+    pub replay_gain_track: bool,
+    pub stereo_correlation: bool,
+    pub tpl_oversample: bool,
 
     #[serde(default = "FolderColumnId::default_order")]
     pub column_order: Vec<FolderColumnId>,
@@ -416,6 +527,9 @@ impl Default for FolderColumnsConfig {
 
             plr: false,
             min_psr: false,
+            replay_gain_track: false,
+            stereo_correlation: false,
+            tpl_oversample: false,
 
             column_order: FolderColumnId::default_order(),
         }
@@ -443,6 +557,51 @@ impl FolderColumnsConfig {
             FolderLogStyle::TruePeaksTable => Self::default(),
             FolderLogStyle::ClassicFooDr => Self::classic_foo_dr(),
             FolderLogStyle::CompactMastering => Self::compact_mastering(),
+            FolderLogStyle::Json => Self::json_default(),
+        }
+    }
+
+    /// JSON default field selection for structured script and automation consumption.
+    pub fn json_default() -> Self {
+        let front = [
+            FolderColumnId::FileName,
+            FolderColumnId::Duration,
+            FolderColumnId::FileFormat,
+            FolderColumnId::SampleRate,
+            FolderColumnId::WordLength,
+            FolderColumnId::BitsUsed,
+            FolderColumnId::DrPmf,
+            FolderColumnId::MaxTplItu,
+            FolderColumnId::MaxSppmJoint,
+            FolderColumnId::RmsJoint,
+            FolderColumnId::Lufsi,
+            FolderColumnId::Lra,
+            FolderColumnId::MinPsr,
+            FolderColumnId::Plr,
+            FolderColumnId::ReplayGainTrack,
+            FolderColumnId::StereoCorrelation,
+            FolderColumnId::TplOversample,
+        ];
+        Self {
+            file_name: true,
+            duration: true,
+            file_format: true,
+            sample_rate: true,
+            word_length: true,
+            bits_used: true,
+            dr_pmf: true,
+            max_tpl_itu: true,
+            max_sppm_joint: true,
+            rms_joint: true,
+            lufsi: true,
+            lra: true,
+            min_psr: true,
+            plr: true,
+            replay_gain_track: true,
+            stereo_correlation: true,
+            tpl_oversample: true,
+            column_order: FolderColumnId::order_with_front(&front),
+            ..Self::empty()
         }
     }
 
@@ -546,7 +705,46 @@ impl FolderColumnsConfig {
             rms_right: true,
             plr: true,
             min_psr: true,
+            replay_gain_track: true,
+            stereo_correlation: true,
+            tpl_oversample: true,
             column_order: FolderColumnId::default_order(),
+        }
+    }
+
+    fn flag_mut(&mut self, col: FolderColumnId) -> &mut bool {
+        match col {
+            FolderColumnId::FileName => &mut self.file_name,
+            FolderColumnId::Duration => &mut self.duration,
+            FolderColumnId::FileFormat => &mut self.file_format,
+            FolderColumnId::SampleRate => &mut self.sample_rate,
+            FolderColumnId::WordLength => &mut self.word_length,
+            FolderColumnId::BitsUsed => &mut self.bits_used,
+            FolderColumnId::DrPmf => &mut self.dr_pmf,
+            FolderColumnId::DrLeft => &mut self.dr_left,
+            FolderColumnId::DrRight => &mut self.dr_right,
+            FolderColumnId::MaxTplItu => &mut self.max_tpl_itu,
+            FolderColumnId::MaxTplLeft => &mut self.max_tpl_left,
+            FolderColumnId::MaxTplRight => &mut self.max_tpl_right,
+            FolderColumnId::Lufsi => &mut self.lufsi,
+            FolderColumnId::Lra => &mut self.lra,
+            FolderColumnId::MaxMomItu => &mut self.max_mom_itu,
+            FolderColumnId::MaxShortTermItu => &mut self.max_short_term_itu,
+            FolderColumnId::MaxMomLeft => &mut self.max_mom_left,
+            FolderColumnId::MaxMomRight => &mut self.max_mom_right,
+            FolderColumnId::MaxShortTermLeft => &mut self.max_short_term_left,
+            FolderColumnId::MaxShortTermRight => &mut self.max_short_term_right,
+            FolderColumnId::MaxSppmJoint => &mut self.max_sppm_joint,
+            FolderColumnId::MaxSppmLeft => &mut self.max_sppm_left,
+            FolderColumnId::MaxSppmRight => &mut self.max_sppm_right,
+            FolderColumnId::RmsJoint => &mut self.rms_joint,
+            FolderColumnId::RmsLeft => &mut self.rms_left,
+            FolderColumnId::RmsRight => &mut self.rms_right,
+            FolderColumnId::Plr => &mut self.plr,
+            FolderColumnId::MinPsr => &mut self.min_psr,
+            FolderColumnId::ReplayGainTrack => &mut self.replay_gain_track,
+            FolderColumnId::StereoCorrelation => &mut self.stereo_correlation,
+            FolderColumnId::TplOversample => &mut self.tpl_oversample,
         }
     }
 
@@ -580,47 +778,23 @@ impl FolderColumnsConfig {
             FolderColumnId::RmsRight => self.rms_right,
             FolderColumnId::Plr => self.plr,
             FolderColumnId::MinPsr => self.min_psr,
+            FolderColumnId::ReplayGainTrack => self.replay_gain_track,
+            FolderColumnId::StereoCorrelation => self.stereo_correlation,
+            FolderColumnId::TplOversample => self.tpl_oversample,
         }
     }
 
     pub fn set_enabled(&mut self, col: FolderColumnId, val: bool) {
         let was_enabled = self.is_enabled(col);
         let active_before = self.active_ordered();
-        match col {
-            FolderColumnId::FileName => self.file_name = val,
-            FolderColumnId::Duration => self.duration = val,
-            FolderColumnId::FileFormat => self.file_format = val,
-            FolderColumnId::SampleRate => self.sample_rate = val,
-            FolderColumnId::WordLength => self.word_length = val,
-            FolderColumnId::BitsUsed => self.bits_used = val,
-            FolderColumnId::DrPmf => self.dr_pmf = val,
-            FolderColumnId::DrLeft => self.dr_left = val,
-            FolderColumnId::DrRight => self.dr_right = val,
-            FolderColumnId::MaxTplItu => self.max_tpl_itu = val,
-            FolderColumnId::MaxTplLeft => self.max_tpl_left = val,
-            FolderColumnId::MaxTplRight => self.max_tpl_right = val,
-            FolderColumnId::Lufsi => self.lufsi = val,
-            FolderColumnId::Lra => self.lra = val,
-            FolderColumnId::MaxMomItu => self.max_mom_itu = val,
-            FolderColumnId::MaxShortTermItu => self.max_short_term_itu = val,
-            FolderColumnId::MaxMomLeft => self.max_mom_left = val,
-            FolderColumnId::MaxMomRight => self.max_mom_right = val,
-            FolderColumnId::MaxShortTermLeft => self.max_short_term_left = val,
-            FolderColumnId::MaxShortTermRight => self.max_short_term_right = val,
-            FolderColumnId::MaxSppmJoint => self.max_sppm_joint = val,
-            FolderColumnId::MaxSppmLeft => self.max_sppm_left = val,
-            FolderColumnId::MaxSppmRight => self.max_sppm_right = val,
-            FolderColumnId::RmsJoint => self.rms_joint = val,
-            FolderColumnId::RmsLeft => self.rms_left = val,
-            FolderColumnId::RmsRight => self.rms_right = val,
-            FolderColumnId::Plr => self.plr = val,
-            FolderColumnId::MinPsr => self.min_psr = val,
-        }
+        *self.flag_mut(col) = val;
 
         if !was_enabled && val {
-            // Place newly enabled column at the end of active columns (or right before trailing FileName)
             let mut new_active = active_before;
-            if new_active.len() >= 2 && new_active.last() == Some(&FolderColumnId::FileName) && col != FolderColumnId::FileName {
+            if new_active.len() >= 2
+                && new_active.last() == Some(&FolderColumnId::FileName)
+                && col != FolderColumnId::FileName
+            {
                 let insert_pos = new_active.len() - 1;
                 new_active.insert(insert_pos, col);
             } else {
@@ -669,6 +843,46 @@ impl FolderColumnsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct StyleColumnsProfiles {
+    pub truepeaks_table: FolderColumnsConfig,
+    pub classic_foo_dr: FolderColumnsConfig,
+    pub compact_mastering: FolderColumnsConfig,
+    pub json: FolderColumnsConfig,
+}
+
+impl Default for StyleColumnsProfiles {
+    fn default() -> Self {
+        Self {
+            truepeaks_table: FolderColumnsConfig::default(),
+            classic_foo_dr: FolderColumnsConfig::classic_foo_dr(),
+            compact_mastering: FolderColumnsConfig::compact_mastering(),
+            json: FolderColumnsConfig::json_default(),
+        }
+    }
+}
+
+impl StyleColumnsProfiles {
+    pub fn get(&self, style: FolderLogStyle) -> &FolderColumnsConfig {
+        match style {
+            FolderLogStyle::TruePeaksTable => &self.truepeaks_table,
+            FolderLogStyle::ClassicFooDr => &self.classic_foo_dr,
+            FolderLogStyle::CompactMastering => &self.compact_mastering,
+            FolderLogStyle::Json => &self.json,
+        }
+    }
+
+    pub fn set(&mut self, style: FolderLogStyle, cfg: FolderColumnsConfig) {
+        match style {
+            FolderLogStyle::TruePeaksTable => self.truepeaks_table = cfg,
+            FolderLogStyle::ClassicFooDr => self.classic_foo_dr = cfg,
+            FolderLogStyle::CompactMastering => self.compact_mastering = cfg,
+            FolderLogStyle::Json => self.json = cfg,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct SingleFileRowsConfig {
     pub max_tpl: bool,
     pub max_sppm: bool,
@@ -680,6 +894,10 @@ pub struct SingleFileRowsConfig {
     pub min_psr: bool,
     pub plr: bool,
     pub lra: bool,
+    pub replay_gain: bool,
+    pub stereo_correlation: bool,
+    #[serde(default, alias = "clipping_and_peaks")]
+    pub peak_timing_diagnostics: bool,
 }
 
 impl Default for SingleFileRowsConfig {
@@ -695,7 +913,66 @@ impl Default for SingleFileRowsConfig {
             min_psr: true,
             plr: true,
             lra: true,
+            replay_gain: false,
+            stereo_correlation: false,
+            peak_timing_diagnostics: false,
         }
+    }
+}
+
+impl SingleFileRowsConfig {
+    pub fn all_with_diagnostics() -> Self {
+        Self {
+            replay_gain: true,
+            stereo_correlation: true,
+            peak_timing_diagnostics: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn none() -> Self {
+        Self {
+            max_tpl: false,
+            max_sppm: false,
+            rms: false,
+            max_momentary: false,
+            max_short_term: false,
+            integrated_loudness: false,
+            dr_pmf: false,
+            min_psr: false,
+            plr: false,
+            lra: false,
+            replay_gain: false,
+            stereo_correlation: false,
+            peak_timing_diagnostics: false,
+        }
+    }
+
+    pub fn set_row_by_name(&mut self, name: &str, val: bool) -> Result<(), String> {
+        let norm: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        match norm.as_str() {
+            "maxtpl" | "tpl" => self.max_tpl = val,
+            "maxsppm" | "sppm" | "peak" => self.max_sppm = val,
+            "rms" => self.rms = val,
+            "maxmomentary" | "mom" | "momentary" => self.max_momentary = val,
+            "maxshortterm" | "shortterm" | "st" => self.max_short_term = val,
+            "integratedloudness" | "lufsi" | "lufs" => self.integrated_loudness = val,
+            "drpmf" | "dr" => self.dr_pmf = val,
+            "minpsr" | "psr" => self.min_psr = val,
+            "plr" => self.plr = val,
+            "lra" => self.lra = val,
+            "replaygain" | "rg" => self.replay_gain = val,
+            "stereocorrelation" | "corr" | "correlation" => self.stereo_correlation = val,
+            "peaktimingdiagnostics" | "peaktiming" | "timing" | "diagnostics" => {
+                self.peak_timing_diagnostics = val;
+            }
+            _ => return Err(format!("Unknown single-file row '{}'", name)),
+        }
+        Ok(())
     }
 }
 
@@ -728,14 +1005,17 @@ impl Default for LogFilenameOptions {
 pub struct AppConfig {
     pub folder_log_style: FolderLogStyle,
     pub folder_columns: FolderColumnsConfig,
+    pub style_columns: StyleColumnsProfiles,
     pub single_rows: SingleFileRowsConfig,
     pub log_filenames: LogFilenameOptions,
     pub surround_folder_mode: SurroundFolderMode,
     pub include_lfe_in_dr: bool,
     pub recurse_subfolders: bool,
     pub combine_dropped_folders: bool,
+    pub use_embedded_tags: bool,
     pub max_threads: usize,
     pub theme: ThemeMode,
+    pub default_results_view: DefaultResultsView,
     pub log_font_size: f32,
     pub window_x: Option<f32>,
     pub window_y: Option<f32>,
@@ -747,6 +1027,7 @@ pub struct AppConfig {
     pub single_log_pattern: String,
     pub save_logs_to_disk: bool,
     pub overwrite_existing_logs: bool,
+    pub custom_output_dir: String,
 }
 
 impl Default for AppConfig {
@@ -757,14 +1038,17 @@ impl Default for AppConfig {
         Self {
             folder_log_style: FolderLogStyle::TruePeaksTable,
             folder_columns: FolderColumnsConfig::default(),
+            style_columns: StyleColumnsProfiles::default(),
             single_rows: SingleFileRowsConfig::default(),
             log_filenames: LogFilenameOptions::default(),
             surround_folder_mode: SurroundFolderMode::ExpandPerChannel,
             include_lfe_in_dr: false,
             recurse_subfolders: false,
             combine_dropped_folders: false,
+            use_embedded_tags: false,
             max_threads: max_cores,
             theme: ThemeMode::System,
+            default_results_view: DefaultResultsView::VisualView,
             log_font_size: 13.5,
             window_x: None,
             window_y: None,
@@ -776,6 +1060,7 @@ impl Default for AppConfig {
             single_log_pattern: "{file_name}_log.txt".to_string(),
             save_logs_to_disk: true,
             overwrite_existing_logs: false,
+            custom_output_dir: String::new(),
         }
     }
 }
@@ -784,6 +1069,19 @@ impl AppConfig {
     pub fn config_path() -> Option<PathBuf> {
         ProjectDirs::from("org", "TruePeaks", "TruePeaks")
             .map(|dirs| dirs.config_dir().join("config.toml"))
+    }
+
+    pub fn sync_active_to_profile(&mut self) {
+        self.style_columns
+            .set(self.folder_log_style, self.folder_columns.clone());
+    }
+
+    pub fn switch_folder_log_style(&mut self, next: FolderLogStyle) {
+        if self.folder_log_style != next {
+            self.sync_active_to_profile();
+            self.folder_log_style = next;
+            self.folder_columns = self.style_columns.get(next).clone();
+        }
     }
 
     pub fn has_saved_window_position(&self) -> bool {
@@ -817,26 +1115,108 @@ impl AppConfig {
         }
     }
 
+    pub fn sanitize(&mut self) {
+        let max_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        self.max_threads = self.max_threads.clamp(1, max_cores);
+        self.log_filenames.max_length = self.log_filenames.max_length.clamp(8, 255);
+        if !self.log_font_size.is_finite() {
+            self.log_font_size = 13.5;
+        } else {
+            self.log_font_size = self.log_font_size.clamp(10.0, 22.0);
+        }
+        self.sanitize_window_geometry();
+    }
+
+    pub fn load_from_path(path: &Path) -> Result<Self, String> {
+        let contents = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read config '{}': {}", path.display(), e))?;
+        let mut cfg = toml::from_str::<AppConfig>(&contents)
+            .map_err(|e| format!("Invalid config TOML '{}': {}", path.display(), e))?;
+        cfg.sanitize();
+        Ok(cfg)
+    }
+
     pub fn load() -> Self {
         if let Some(path) = Self::config_path() {
-            if let Ok(contents) = fs::read_to_string(&path) {
-                if let Ok(mut cfg) = toml::from_str::<AppConfig>(&contents) {
-                    let max_cores = std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(4);
-                    cfg.max_threads = cfg.max_threads.clamp(1, max_cores);
-                    cfg.log_filenames.max_length = cfg.log_filenames.max_length.clamp(8, 255);
-                    if !cfg.log_font_size.is_finite() {
-                        cfg.log_font_size = 13.5;
-                    } else {
-                        cfg.log_font_size = cfg.log_font_size.clamp(10.0, 22.0);
-                    }
-                    cfg.sanitize_window_geometry();
-                    return cfg;
-                }
+            if let Ok(cfg) = Self::load_from_path(&path) {
+                return cfg;
             }
         }
         Self::default()
+    }
+
+    /// Temporarily overrides any configuration field using TOML dot-notation
+    /// (never writes changes to disk).
+    pub fn apply_key_value_override(&mut self, key: &str, raw_val: &str) -> Result<(), String> {
+        let mut root = toml::Value::try_from(self.clone())
+            .map_err(|e| format!("Failed to inspect config: {}", e))?;
+        let parts: Vec<&str> = key.split('.').collect();
+        if parts.is_empty() || parts.iter().any(|p| p.trim().is_empty()) {
+            return Err(format!("Invalid config key '{}'", key));
+        }
+
+        let mut cur = &mut root;
+        for part in &parts[..parts.len() - 1] {
+            let tbl = cur
+                .as_table_mut()
+                .ok_or_else(|| format!("Key path '{}' does not address a table", key))?;
+            cur = tbl
+                .get_mut(*part)
+                .ok_or_else(|| format!("Unknown config section '{}' in '{}'", part, key))?;
+        }
+        let leaf_name = parts[parts.len() - 1];
+        let tbl = cur
+            .as_table_mut()
+            .ok_or_else(|| format!("Key path '{}' does not address a table", key))?;
+        let existing = tbl
+            .get_mut(leaf_name)
+            .ok_or_else(|| format!("Unknown config key '{}'", key))?;
+
+        let new_val = match existing {
+            toml::Value::Boolean(_) => toml::Value::Boolean(parse_bool_str(raw_val, key)?),
+            toml::Value::Integer(_) => {
+                let n = raw_val
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| format!("Expected integer for '{}', got '{}'", key, raw_val))?;
+                toml::Value::Integer(n)
+            }
+            toml::Value::Float(_) => {
+                let f = raw_val
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("Expected number for '{}', got '{}'", key, raw_val))?;
+                toml::Value::Float(f)
+            }
+            toml::Value::String(_) => toml::Value::String(raw_val.to_string()),
+            toml::Value::Array(_) => {
+                let items: Vec<toml::Value> = raw_val
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| toml::Value::String(s.to_string()))
+                    .collect();
+                toml::Value::Array(items)
+            }
+            _ => {
+                return Err(format!("Config key '{}' cannot be set via a scalar value", key));
+            }
+        };
+        *existing = new_val;
+
+        let mut updated: AppConfig = root
+            .try_into()
+            .map_err(|e| format!("Invalid value '{}' for '{}': {}", raw_val, key, e))?;
+        updated.sanitize();
+        if key == "folder_log_style" {
+            updated.folder_columns = updated.style_columns.get(updated.folder_log_style).clone();
+        } else if key.starts_with("folder_columns.") {
+            updated.sync_active_to_profile();
+        }
+        *self = updated;
+        Ok(())
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -848,5 +1228,16 @@ impl AppConfig {
             fs::write(path, data).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+
+fn parse_bool_str(s: &str, key: &str) -> Result<bool, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!(
+            "Expected boolean (true/false) for '{}', got '{}'",
+            key, s
+        )),
     }
 }

@@ -21,14 +21,14 @@ impl MathSvgCache {
         let scale_key = (pixels_per_point.clamp(1.0, 4.0) * 100.0).round() as u32;
         let key = (asset.id, scale_key);
 
-        if !self.textures.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.textures.entry(key) {
             let effective_ppp = (scale_key as f32) / 100.0;
             let (px_w, px_h, rgba) = rasterize_svg_rgba(asset, effective_ppp).ok()?;
             let image = ColorImage::from_rgba_premultiplied([px_w as usize, px_h as usize], &rgba);
             let tex_name = format!("math_svg_{}_{}", asset.id, scale_key);
             // tiny-skia already computes subpixel AA into exact physical pixels; NEAREST prevents GPU bilinear blur.
             let handle = ctx.load_texture(tex_name, image, TextureOptions::NEAREST);
-            self.textures.insert(key, handle);
+            e.insert(handle);
         }
 
         self.textures.get(&key)
@@ -46,7 +46,7 @@ impl MathSvgCache {
         let px = (size_pt * pixels_per_point.clamp(1.0, 4.0)).round().clamp(8.0, 256.0) as u32;
         let key = (id, px);
 
-        if !self.textures.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(e) = self.textures.entry(key) {
             let opts = usvg::Options::default();
             let tree = usvg::Tree::from_data(svg_bytes, &opts).ok()?;
             let svg_size = tree.size();
@@ -62,7 +62,7 @@ impl MathSvgCache {
                 ColorImage::from_rgba_premultiplied([px as usize, px as usize], &pixmap.take());
             let tex_name = format!("ui_svg_{}_{}", id, px);
             let handle = ctx.load_texture(tex_name, image, TextureOptions::NEAREST);
-            self.textures.insert(key, handle);
+            e.insert(handle);
         }
 
         self.textures.get(&key)

@@ -16,7 +16,8 @@ Whenever any DSP algorithm, mathematical formula, filter coefficient, block leng
 
 Project-specific agent workflows are packaged under [`.agents/skills/`](.agents/skills/):
 
-- **[`truepeaks-dsp-math-sync`](.agents/skills/truepeaks-dsp-math-sync/SKILL.md):** Runbook for keeping `README.md` math blocks, `assets/math/*.svgz`, `src/math_assets.rs`, `src/app.rs`, and `assets/icon.svg` / `assets/icon.ico` synchronized.
+- **[`truepeaks-audio-dsp-math`](.agents/skills/truepeaks-audio-dsp-math/SKILL.md):** Exact specification of all audio DSP, loudness, peak, dynamic range, phase correlation, and aggregation mathematics in TruePeaks.
+- **[`truepeaks-dsp-math-sync`](.agents/skills/truepeaks-dsp-math-sync/SKILL.md):** Runbook for keeping `README.md` math blocks, `assets/math/*.svgz`, `src/math_assets.rs`, `src/app.rs`, and `assets/icon.svg` / `assets/icon.ico` / `assets/icon.icns` synchronized.
 - **[`truepeaks-release-workflow`](.agents/skills/truepeaks-release-workflow/SKILL.md):** Runbook for bumping versions in `Cargo.toml` / `Cargo.lock`, updating `DEVELOPMENT_LOG.md`, running `--locked` release builds and tests with zero warnings, and pushing `v*` tags to trigger [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
 ## Project Practices

@@ -4,6 +4,7 @@ use crate::config::{
 };
 use crate::decoder::SpeakerChannel;
 use crate::dsp::TrackAnalysis;
+use crate::formatter::export::{json_escape, json_f64_or_null};
 use crate::formatter::single_log::format_single_file_log;
 use crate::formatter::{
     folder_display_name, format_log_track_name, format_sample_rate, pad_left_visual, visual_width,
@@ -49,50 +50,85 @@ pub fn format_folder_log(
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
 ) -> String {
-    format_folder_log_with_header(
-        folder_path,
+    format_folder_log_ex(
+        &folder_display_name(folder_path, "Album"),
         tracks,
         style,
         cols_cfg,
         name_opts,
         surround_mode,
-        true,
+        false,
     )
 }
 
-fn format_folder_log_with_header(
-    folder_path: &Path,
+pub fn format_folder_log_ex(
+    album_name: &str,
     tracks: &[TrackAnalysis],
     style: FolderLogStyle,
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+) -> String {
+    format_folder_log_with_header(
+        album_name,
+        tracks,
+        style,
+        cols_cfg,
+        name_opts,
+        surround_mode,
+        use_embedded_tags,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_folder_log_with_header(
+    album_name: &str,
+    tracks: &[TrackAnalysis],
+    style: FolderLogStyle,
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
     include_header: bool,
 ) -> String {
     match style {
         FolderLogStyle::TruePeaksTable => format_truepeaks_table(
-            folder_path,
+            album_name,
             tracks,
             cols_cfg,
             name_opts,
             surround_mode,
+            use_embedded_tags,
             include_header,
         ),
         FolderLogStyle::ClassicFooDr => format_classic_foo_dr(
-            folder_path,
+            album_name,
             tracks,
             cols_cfg,
             name_opts,
             surround_mode,
+            use_embedded_tags,
             include_header,
         ),
         FolderLogStyle::CompactMastering => format_compact_mastering(
-            folder_path,
+            album_name,
             tracks,
             cols_cfg,
             name_opts,
             surround_mode,
+            use_embedded_tags,
             include_header,
+        ),
+        FolderLogStyle::Json => format_json_folder_log(
+            album_name,
+            tracks,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
+            0,
         ),
     }
 }
@@ -128,7 +164,7 @@ fn codec_display_name(ext: &str) -> String {
         "aac" => "AAC".to_string(),
         "ogg" | "oga" => "Ogg Vorbis".to_string(),
         "caf" => "CAF".to_string(),
-        other if other.is_empty() => "Unknown".to_string(),
+        "" => "Unknown".to_string(),
         other => other.to_ascii_uppercase(),
     }
 }
@@ -238,8 +274,13 @@ fn build_columns_for_style(
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
     tracks: &[TrackAnalysis],
 ) -> Vec<ColumnDef> {
+    let style = match style {
+        FolderLogStyle::Json => FolderLogStyle::TruePeaksTable,
+        other => other,
+    };
     let max_channels = tracks
         .iter()
         .map(|t| t.channels.len())
@@ -524,13 +565,19 @@ fn build_columns_for_style(
                                 }),
                             });
                         }
+                        (FolderLogStyle::Json, _) => {}
                     }
                 }
                 continue;
             }
         }
 
-        cols.push(build_single_column_def(style, col_id, name_opts));
+        cols.push(build_single_column_def(
+            style,
+            col_id,
+            name_opts,
+            use_embedded_tags,
+        ));
     }
 
     cols
@@ -540,23 +587,31 @@ fn build_single_column_def(
     style: FolderLogStyle,
     col_id: FolderColumnId,
     name_opts: &LogFilenameOptions,
+    use_embedded_tags: bool,
 ) -> ColumnDef {
     let name_opts_copy = *name_opts;
     match (style, col_id) {
+        (FolderLogStyle::Json, c) => {
+            build_single_column_def(FolderLogStyle::TruePeaksTable, c, name_opts, use_embedded_tags)
+        }
         // File Name / Track
         (FolderLogStyle::TruePeaksTable, FolderColumnId::FileName) => ColumnDef {
             id: col_id,
             header: "File Name".to_string(),
             align: ColumnAlign::Right,
             min_width: 0,
-            extract: Box::new(move |t| format_log_track_name(&t.file_stem, &name_opts_copy)),
+            extract: Box::new(move |t| {
+                format_log_track_name(&t.display_name(use_embedded_tags), &name_opts_copy)
+            }),
         },
         (_, FolderColumnId::FileName) => ColumnDef {
             id: col_id,
             header: "Track".to_string(),
             align: ColumnAlign::Left,
             min_width: 5,
-            extract: Box::new(move |t| format_log_track_name(&t.file_stem, &name_opts_copy)),
+            extract: Box::new(move |t| {
+                format_log_track_name(&t.display_name(use_embedded_tags), &name_opts_copy)
+            }),
         },
 
         // Duration / Time
@@ -1126,6 +1181,79 @@ fn build_single_column_def(
             min_width: 6,
             extract: Box::new(|t| format_db_plain(t.min_psr, false)),
         },
+
+        // Diagnostics & ReplayGain
+        (FolderLogStyle::TruePeaksTable, FolderColumnId::ReplayGainTrack) => ColumnDef {
+            id: col_id,
+            header: "RG Track".to_string(),
+            align: ColumnAlign::Right,
+            min_width: 0,
+            extract: Box::new(|t| {
+                t.replay_gain_track_db
+                    .map(|v| format!("{:+.2}", v))
+                    .unwrap_or_else(|| "-".to_string())
+            }),
+        },
+        (FolderLogStyle::ClassicFooDr, FolderColumnId::ReplayGainTrack) => ColumnDef {
+            id: col_id,
+            header: "RG Track".to_string(),
+            align: ColumnAlign::Right,
+            min_width: 9,
+            extract: Box::new(|t| {
+                t.replay_gain_track_db
+                    .map(|v| format_unit_suffix(v, "dB", true))
+                    .unwrap_or_else(|| "-".to_string())
+            }),
+        },
+        (FolderLogStyle::CompactMastering, FolderColumnId::ReplayGainTrack) => ColumnDef {
+            id: col_id,
+            header: "RG dB".to_string(),
+            align: ColumnAlign::Right,
+            min_width: 7,
+            extract: Box::new(|t| {
+                t.replay_gain_track_db
+                    .map(|v| format_db_plain(v, true))
+                    .unwrap_or_else(|| "-".to_string())
+            }),
+        },
+
+        (FolderLogStyle::TruePeaksTable, FolderColumnId::StereoCorrelation) => ColumnDef {
+            id: col_id,
+            header: "Stereo Corr.".to_string(),
+            align: ColumnAlign::Right,
+            min_width: 0,
+            extract: Box::new(|t| {
+                t.stereo_correlation
+                    .map(|r| format!("{:+.3}", r))
+                    .unwrap_or_else(|| "-".to_string())
+            }),
+        },
+        (_, FolderColumnId::StereoCorrelation) => ColumnDef {
+            id: col_id,
+            header: "Corr".to_string(),
+            align: ColumnAlign::Right,
+            min_width: 6,
+            extract: Box::new(|t| {
+                t.stereo_correlation
+                    .map(|r| format!("{:+.2}", r))
+                    .unwrap_or_else(|| "-".to_string())
+            }),
+        },
+
+        (FolderLogStyle::TruePeaksTable, FolderColumnId::TplOversample) => ColumnDef {
+            id: col_id,
+            header: "TPL Oversample".to_string(),
+            align: ColumnAlign::Right,
+            min_width: 0,
+            extract: Box::new(|t| format!("{}x", t.tpl_oversample_factor)),
+        },
+        (_, FolderColumnId::TplOversample) => ColumnDef {
+            id: col_id,
+            header: "TPL OS".to_string(),
+            align: ColumnAlign::Right,
+            min_width: 6,
+            extract: Box::new(|t| format!("{}x", t.tpl_oversample_factor)),
+        },
     }
 }
 
@@ -1187,19 +1315,20 @@ fn render_space_aligned_table(cols: &[ColumnDef], tracks: &[TrackAnalysis]) -> (
 }
 
 fn format_classic_foo_dr(
-    folder_path: &Path,
+    album_name: &str,
     tracks: &[TrackAnalysis],
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
     include_header: bool,
 ) -> String {
-    let album_name = folder_display_name(folder_path, "Album");
     let cols = build_columns_for_style(
         FolderLogStyle::ClassicFooDr,
         cols_cfg,
         name_opts,
         surround_mode,
+        use_embedded_tags,
         tracks,
     );
 
@@ -1218,7 +1347,7 @@ fn format_classic_foo_dr(
             let peak_col = format_db_suffix(t.max_sppm_joint);
             let rms_col = format_db_suffix(t.combined_rms_db());
             let dur_col = format_duration_mmss(t.duration_secs());
-            let track_name = format_log_track_name(&t.file_stem, name_opts);
+            let track_name = format_log_track_name(&t.display_name(use_embedded_tags), name_opts);
             rlines.push(format!(
                 "{:<9}{:>9}   {:>9} {:>9} {}",
                 dr_col, peak_col, rms_col, dur_col, track_name
@@ -1268,20 +1397,21 @@ fn format_classic_foo_dr(
 }
 
 fn format_compact_mastering(
-    folder_path: &Path,
+    album_name: &str,
     tracks: &[TrackAnalysis],
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
     include_header: bool,
 ) -> String {
-    let album_name = folder_display_name(folder_path, "Album");
     let official_dr = compute_official_album_dr(tracks);
     let cols = build_columns_for_style(
         FolderLogStyle::CompactMastering,
         cols_cfg,
         name_opts,
         surround_mode,
+        use_embedded_tags,
         tracks,
     );
 
@@ -1309,7 +1439,7 @@ fn format_compact_mastering(
                 format_db_plain(t.integrated_lufs, false),
                 format_db_plain(t.min_psr, false),
                 format_duration_mmss(t.duration_secs()),
-                format_log_track_name(&t.file_stem, name_opts)
+                format_log_track_name(&t.display_name(use_embedded_tags), name_opts)
             ));
         }
         (hdr, rlines, 80usize)
@@ -1382,11 +1512,12 @@ fn format_compact_mastering(
 }
 
 fn format_truepeaks_table(
-    folder_path: &Path,
+    album_name: &str,
     tracks: &[TrackAnalysis],
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
     include_header: bool,
 ) -> String {
     let cols = build_columns_for_style(
@@ -1394,6 +1525,7 @@ fn format_truepeaks_table(
         cols_cfg,
         name_opts,
         surround_mode,
+        use_embedded_tags,
         tracks,
     );
 
@@ -1418,7 +1550,7 @@ fn format_truepeaks_table(
     let mut lines: Vec<String> = Vec::with_capacity(tracks.len() + 8);
     lines.push(String::new());
     if include_header {
-        lines.push(folder_display_name(folder_path, "Album"));
+        lines.push(album_name.to_string());
         lines.push(String::new());
     }
 
@@ -1543,6 +1675,7 @@ fn append_sections(
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
 ) {
     for (rel_path, node) in sections {
         if !out.is_empty() {
@@ -1550,12 +1683,13 @@ fn append_sections(
         }
         append_directory_banner(out, rel_path, &node.tracks);
         out.push(format_folder_log_with_header(
-            &node.path,
+            &node.display_name,
             &node.tracks,
             style,
             cols_cfg,
             name_opts,
             surround_mode,
+            use_embedded_tags,
             false,
         ));
     }
@@ -1568,10 +1702,19 @@ fn append_folder_sections(
     cols_cfg: &FolderColumnsConfig,
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
 ) {
     let mut sections = Vec::new();
     collect_non_empty_sections(root, &root.display_name, &mut sections);
-    append_sections(out, &sections, style, cols_cfg, name_opts, surround_mode);
+    append_sections(
+        out,
+        &sections,
+        style,
+        cols_cfg,
+        name_opts,
+        surround_mode,
+        use_embedded_tags,
+    );
 }
 
 pub fn format_recursive_folder_log(
@@ -1581,17 +1724,40 @@ pub fn format_recursive_folder_log(
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
 ) -> String {
+    format_recursive_folder_log_ex(root, style, cols_cfg, name_opts, surround_mode, false)
+}
+
+pub fn format_recursive_folder_log_ex(
+    root: &FolderTreeNode,
+    style: FolderLogStyle,
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+) -> String {
     let mut sections = Vec::new();
     collect_non_empty_sections(root, &root.display_name, &mut sections);
     if sections.len() == 1 {
         let (_, only_node) = sections[0];
-        return format_folder_log(
-            &only_node.path,
+        return format_folder_log_ex(
+            &only_node.display_name,
             &only_node.tracks,
             style,
             cols_cfg,
             name_opts,
             surround_mode,
+            use_embedded_tags,
+        );
+    }
+
+    if style == FolderLogStyle::Json {
+        return format_json_recursive(
+            root,
+            &sections,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
         );
     }
 
@@ -1601,7 +1767,15 @@ pub fn format_recursive_folder_log(
     let overall_dr = root.official_dr();
 
     let mut out = Vec::new();
-    append_sections(&mut out, &sections, style, cols_cfg, name_opts, surround_mode);
+    append_sections(
+        &mut out,
+        &sections,
+        style,
+        cols_cfg,
+        name_opts,
+        surround_mode,
+        use_embedded_tags,
+    );
 
     if folder_cnt > 1 {
         if !out.is_empty() {
@@ -1631,6 +1805,40 @@ pub fn format_combined_multi_log(
     name_opts: &LogFilenameOptions,
     surround_mode: SurroundFolderMode,
 ) -> String {
+    format_combined_multi_log_ex(
+        roots,
+        loose_tracks,
+        style,
+        cols_cfg,
+        single_rows,
+        name_opts,
+        surround_mode,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn format_combined_multi_log_ex(
+    roots: &[FolderTreeNode],
+    loose_tracks: &[TrackAnalysis],
+    style: FolderLogStyle,
+    cols_cfg: &FolderColumnsConfig,
+    single_rows: &SingleFileRowsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+) -> String {
+    if style == FolderLogStyle::Json {
+        return format_json_combined(
+            roots,
+            loose_tracks,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
+        );
+    }
+
     let rule_dash = "-".repeat(80);
     let rule_eq = "=".repeat(80);
 
@@ -1657,7 +1865,15 @@ pub fn format_combined_multi_log(
     out.push(rule_eq.clone());
 
     for root in roots {
-        append_folder_sections(&mut out, root, style, cols_cfg, name_opts, surround_mode);
+        append_folder_sections(
+            &mut out,
+            root,
+            style,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
+        );
     }
 
     if !loose_tracks.is_empty() {
@@ -1690,4 +1906,445 @@ pub fn format_combined_multi_log(
     }
 
     out.join("\n")
+}
+
+fn push_json_f64_array(fields: &mut Vec<(String, String)>, key: &str, vals: &[f64]) {
+    let items: Vec<String> = vals.iter().map(|&v| json_f64_or_null(v)).collect();
+    fields.push((key.to_string(), format!("[{}]", items.join(", "))));
+}
+
+fn format_json_track_fields(
+    track: &TrackAnalysis,
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+) -> Vec<(String, String)> {
+    let mut active_ids = cols_cfg.active_ordered();
+    if active_ids.is_empty() {
+        active_ids = FolderColumnsConfig::json_default().active_ordered();
+    }
+
+    let mut fields: Vec<(String, String)> = Vec::with_capacity(active_ids.len() + 4);
+    let expand_surround =
+        track.channels.len() > 2 && surround_mode == SurroundFolderMode::ExpandPerChannel;
+    let mut surround_emitted = false;
+
+    for col in active_ids {
+        match col {
+            FolderColumnId::FileName => {
+                let lbl = format_log_track_name(&track.display_name(use_embedded_tags), name_opts);
+                fields.push(("file_name".into(), format!("\"{}\"", json_escape(&lbl))));
+            }
+            FolderColumnId::Duration => {
+                fields.push((
+                    "duration_secs".into(),
+                    format!("{:.3}", track.duration_secs()),
+                ));
+            }
+            FolderColumnId::FileFormat => {
+                fields.push((
+                    "format".into(),
+                    format!("\"{}\"", json_escape(&track.file_format)),
+                ));
+            }
+            FolderColumnId::SampleRate => {
+                fields.push(("sample_rate_hz".into(), track.sample_rate.to_string()));
+            }
+            FolderColumnId::WordLength => {
+                fields.push((
+                    "word_length".into(),
+                    track
+                        .word_length
+                        .map(|w| w.to_string())
+                        .unwrap_or_else(|| "null".into()),
+                ));
+            }
+            FolderColumnId::BitsUsed => {
+                fields.push((
+                    "bits_used".into(),
+                    track
+                        .bits_used
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| "null".into()),
+                ));
+            }
+            FolderColumnId::DrPmf => {
+                fields.push(("dr_pmf".into(), track.dr_track_rounded.to_string()));
+            }
+            FolderColumnId::DrLeft => {
+                fields.push((
+                    "dr_left".into(),
+                    json_f64_or_null(*track.dr_channels.first().unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::DrRight => {
+                fields.push((
+                    "dr_right".into(),
+                    json_f64_or_null(*track.dr_channels.get(1).unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::MaxTplItu => {
+                fields.push(("max_tpl_dbtp".into(), json_f64_or_null(track.max_tpl_joint)));
+            }
+            FolderColumnId::MaxTplLeft => {
+                fields.push((
+                    "max_tpl_left_dbtp".into(),
+                    json_f64_or_null(*track.max_tpl_channels.first().unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::MaxTplRight => {
+                fields.push((
+                    "max_tpl_right_dbtp".into(),
+                    json_f64_or_null(*track.max_tpl_channels.get(1).unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::Lufsi => {
+                fields.push((
+                    "integrated_lufs".into(),
+                    json_f64_or_null(track.integrated_lufs),
+                ));
+            }
+            FolderColumnId::Lra => {
+                fields.push(("lra_lu".into(), json_f64_or_null(track.lra)));
+            }
+            FolderColumnId::MaxMomItu => {
+                fields.push((
+                    "max_momentary_lufs".into(),
+                    json_f64_or_null(track.max_mom_joint),
+                ));
+            }
+            FolderColumnId::MaxShortTermItu => {
+                fields.push((
+                    "max_short_term_lufs".into(),
+                    json_f64_or_null(track.max_short_term_joint),
+                ));
+            }
+            FolderColumnId::MaxMomLeft => {
+                fields.push((
+                    "max_momentary_left_lufs".into(),
+                    json_f64_or_null(*track.max_mom_channels.first().unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::MaxMomRight => {
+                fields.push((
+                    "max_momentary_right_lufs".into(),
+                    json_f64_or_null(*track.max_mom_channels.get(1).unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::MaxShortTermLeft => {
+                fields.push((
+                    "max_short_term_left_lufs".into(),
+                    json_f64_or_null(*track.max_short_term_channels.first().unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::MaxShortTermRight => {
+                fields.push((
+                    "max_short_term_right_lufs".into(),
+                    json_f64_or_null(*track.max_short_term_channels.get(1).unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::MaxSppmJoint => {
+                fields.push((
+                    "max_sppm_dbfs".into(),
+                    json_f64_or_null(track.max_sppm_joint),
+                ));
+            }
+            FolderColumnId::MaxSppmLeft => {
+                fields.push((
+                    "max_sppm_left_dbfs".into(),
+                    json_f64_or_null(*track.max_sppm_channels.first().unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::MaxSppmRight => {
+                fields.push((
+                    "max_sppm_right_dbfs".into(),
+                    json_f64_or_null(*track.max_sppm_channels.get(1).unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::RmsJoint => {
+                fields.push((
+                    "rms_aes17_dbfs".into(),
+                    json_f64_or_null(track.combined_rms_db()),
+                ));
+            }
+            FolderColumnId::RmsLeft => {
+                fields.push((
+                    "rms_left_dbfs".into(),
+                    json_f64_or_null(*track.rms_channels.first().unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::RmsRight => {
+                fields.push((
+                    "rms_right_dbfs".into(),
+                    json_f64_or_null(*track.rms_channels.get(1).unwrap_or(&f64::NAN)),
+                ));
+            }
+            FolderColumnId::Plr => {
+                fields.push(("plr_lu".into(), json_f64_or_null(track.plr)));
+            }
+            FolderColumnId::MinPsr => {
+                fields.push(("min_psr_lu".into(), json_f64_or_null(track.min_psr)));
+            }
+            FolderColumnId::ReplayGainTrack => {
+                fields.push((
+                    "replay_gain_track_db".into(),
+                    track
+                        .replay_gain_track_db
+                        .map(json_f64_or_null)
+                        .unwrap_or_else(|| "null".into()),
+                ));
+            }
+            FolderColumnId::StereoCorrelation => {
+                fields.push((
+                    "stereo_correlation".into(),
+                    track
+                        .stereo_correlation
+                        .map(json_f64_or_null)
+                        .unwrap_or_else(|| "null".into()),
+                ));
+            }
+            FolderColumnId::TplOversample => {
+                fields.push((
+                    "tpl_oversample_factor".into(),
+                    track.tpl_oversample_factor.to_string(),
+                ));
+            }
+        }
+
+        if expand_surround && !surround_emitted && surround_group_for(col).is_some() {
+            surround_emitted = true;
+            let labels: Vec<String> = track
+                .channels
+                .iter()
+                .map(|c| format!("\"{}\"", json_escape(&c.short_label())))
+                .collect();
+            fields.push((
+                "channel_labels".into(),
+                format!("[{}]", labels.join(", ")),
+            ));
+            push_json_f64_array(&mut fields, "dr_channels", &track.dr_channels);
+            push_json_f64_array(&mut fields, "max_tpl_channels_dbtp", &track.max_tpl_channels);
+            push_json_f64_array(
+                &mut fields,
+                "max_momentary_channels_lufs",
+                &track.max_mom_channels,
+            );
+            push_json_f64_array(
+                &mut fields,
+                "max_short_term_channels_lufs",
+                &track.max_short_term_channels,
+            );
+            push_json_f64_array(
+                &mut fields,
+                "max_sppm_channels_dbfs",
+                &track.max_sppm_channels,
+            );
+            push_json_f64_array(&mut fields, "rms_channels_dbfs", &track.rms_channels);
+        }
+    }
+
+    fields
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_json_track_obj(
+    out: &mut String,
+    track: &TrackAnalysis,
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+    pad: &str,
+    trailing_comma: bool,
+) {
+    let fields =
+        format_json_track_fields(track, cols_cfg, name_opts, surround_mode, use_embedded_tags);
+    out.push_str(&format!("{}{{\n", pad));
+    for (idx, (k, v)) in fields.iter().enumerate() {
+        let comma = if idx + 1 < fields.len() { "," } else { "" };
+        out.push_str(&format!(
+            "{}  \"{}\": {}{}\n",
+            pad,
+            json_escape(k),
+            v,
+            comma
+        ));
+    }
+    let obj_comma = if trailing_comma { "," } else { "" };
+    out.push_str(&format!("{}}}{}\n", pad, obj_comma));
+}
+
+fn format_json_folder_log(
+    album_name: &str,
+    tracks: &[TrackAnalysis],
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+    base_indent: usize,
+) -> String {
+    let pad = " ".repeat(base_indent);
+    let inner_pad = " ".repeat(base_indent + 2);
+    let track_pad = " ".repeat(base_indent + 4);
+    let official_dr = compute_official_album_dr(tracks);
+    let (sr_str, ch_str, bits_opt, bitrate_opt, codec_str) = album_summary_metadata(tracks);
+
+    let mut out = String::new();
+    out.push_str(&format!("{}{{\n", pad));
+    out.push_str(&format!(
+        "{}\"album_title\": \"{}\",\n",
+        inner_pad,
+        json_escape(album_name)
+    ));
+    out.push_str(&format!("{}\"official_dr\": {},\n", inner_pad, official_dr));
+    out.push_str(&format!("{}\"track_count\": {},\n", inner_pad, tracks.len()));
+    out.push_str(&format!(
+        "{}\"sample_rate\": \"{}\",\n",
+        inner_pad,
+        json_escape(&sr_str)
+    ));
+    out.push_str(&format!(
+        "{}\"channels\": \"{}\",\n",
+        inner_pad,
+        json_escape(&ch_str)
+    ));
+    if let Some(bits_str) = bits_opt {
+        out.push_str(&format!(
+            "{}\"bits_per_sample\": \"{}\",\n",
+            inner_pad,
+            json_escape(&bits_str)
+        ));
+    }
+    if let Some(kbps) = bitrate_opt {
+        out.push_str(&format!("{}\"bitrate_kbps\": {},\n", inner_pad, kbps));
+    }
+    out.push_str(&format!(
+        "{}\"codec\": \"{}\",\n",
+        inner_pad,
+        json_escape(&codec_str)
+    ));
+    out.push_str(&format!("{}\"tracks\": [\n", inner_pad));
+    for (idx, t) in tracks.iter().enumerate() {
+        push_json_track_obj(
+            &mut out,
+            t,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
+            &track_pad,
+            idx + 1 < tracks.len(),
+        );
+    }
+    out.push_str(&format!("{}]\n", inner_pad));
+    out.push_str(&format!("{}}}", pad));
+    out
+}
+
+fn format_json_recursive(
+    root: &FolderTreeNode,
+    sections: &[(String, &FolderTreeNode)],
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+) -> String {
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str(&format!(
+        "  \"root_folder\": \"{}\",\n",
+        json_escape(&root.display_name)
+    ));
+    out.push_str(&format!(
+        "  \"official_overall_dr\": {},\n",
+        root.official_dr()
+    ));
+    out.push_str(&format!("  \"folder_count\": {},\n", sections.len()));
+    out.push_str(&format!(
+        "  \"track_count\": {},\n",
+        root.total_track_count()
+    ));
+    out.push_str("  \"folders\": [\n");
+    for (idx, (rel_path, node)) in sections.iter().enumerate() {
+        let folder_json = format_json_folder_log(
+            rel_path,
+            &node.tracks,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
+            4,
+        );
+        out.push_str(&folder_json);
+        if idx + 1 < sections.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("  ]\n}");
+    out
+}
+
+fn format_json_combined(
+    roots: &[FolderTreeNode],
+    loose_tracks: &[TrackAnalysis],
+    cols_cfg: &FolderColumnsConfig,
+    name_opts: &LogFilenameOptions,
+    surround_mode: SurroundFolderMode,
+    use_embedded_tags: bool,
+) -> String {
+    let mut sections = Vec::new();
+    for root in roots {
+        collect_non_empty_sections(root, &root.display_name, &mut sections);
+    }
+    let folder_tracks: usize = roots.iter().map(|r| r.total_track_count()).sum();
+    let total_tracks = folder_tracks + loose_tracks.len();
+    let sum_dr: f64 = roots.iter().map(|r| r.sum_dr_raw()).sum::<f64>()
+        + loose_tracks.iter().map(|t| t.dr_track_raw).sum::<f64>();
+    let overall_dr = if total_tracks == 0 {
+        0
+    } else {
+        (sum_dr / (total_tracks as f64)).round() as i32
+    };
+
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str("  \"combined_batch\": true,\n");
+    out.push_str(&format!("  \"official_overall_dr\": {},\n", overall_dr));
+    out.push_str(&format!("  \"folder_count\": {},\n", sections.len()));
+    out.push_str(&format!("  \"track_count\": {},\n", total_tracks));
+    out.push_str("  \"folders\": [\n");
+    for (idx, (rel_path, node)) in sections.iter().enumerate() {
+        let folder_json = format_json_folder_log(
+            rel_path,
+            &node.tracks,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
+            4,
+        );
+        out.push_str(&folder_json);
+        if idx + 1 < sections.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("  ],\n");
+    out.push_str("  \"individual_files\": [\n");
+    for (idx, t) in loose_tracks.iter().enumerate() {
+        push_json_track_obj(
+            &mut out,
+            t,
+            cols_cfg,
+            name_opts,
+            surround_mode,
+            use_embedded_tags,
+            "    ",
+            idx + 1 < loose_tracks.len(),
+        );
+    }
+    out.push_str("  ]\n}");
+    out
 }

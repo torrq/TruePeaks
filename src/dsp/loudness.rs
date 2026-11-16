@@ -3,6 +3,25 @@ use ebur128::{EbuR128, Mode};
 use std::collections::VecDeque;
 
 const LOUDNESS_OFFSET_LUFS: f64 = -0.691;
+const MAX_TIMELINE_POINTS: usize = 200;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TimelinePoint {
+    pub time_secs: f32,
+    pub sppm_db: f32,
+    pub short_term_lufs: f32,
+    pub psr_db: f32,
+}
+
+pub fn tpl_oversampling_factor(sample_rate: u32) -> u32 {
+    if sample_rate < 96_000 {
+        4
+    } else if sample_rate < 192_000 {
+        2
+    } else {
+        1
+    }
+}
 
 /// Exact ITU-R BS.1770-4 two-stage K-weighting biquad filter (bilinear transform at any sample rate,
 /// matching `ebur128::filter`).
@@ -112,7 +131,17 @@ pub struct LoudnessAnalyzer {
     max_sum_m_channels: Vec<f64>,
     max_sum_s_channels: Vec<f64>,
     min_psr_lin_ratio: f64,
+    min_psr_frame: Option<u64>,
     psr_gate_sum_thresh: f64,
+
+    /// Compact decimated timeline envelope (~0.5s bins compacted to <= MAX_TIMELINE_POINTS)
+    sample_rate: u32,
+    bucket_frames: u64,
+    bucket_progress: u64,
+    bucket_peak_lin: f64,
+    bucket_sum_s_max: f64,
+    bucket_psr_min_ratio: f64,
+    timeline: Vec<TimelinePoint>,
 }
 
 impl LoudnessAnalyzer {
@@ -163,7 +192,15 @@ impl LoudnessAnalyzer {
             max_sum_m_channels: vec![0.0; num_channels],
             max_sum_s_channels: vec![0.0; num_channels],
             min_psr_lin_ratio: f64::INFINITY,
+            min_psr_frame: None,
             psr_gate_sum_thresh,
+            sample_rate,
+            bucket_frames: ((sample_rate as u64) / 2).max(1),
+            bucket_progress: 0,
+            bucket_peak_lin: 0.0,
+            bucket_sum_s_max: 0.0,
+            bucket_psr_min_ratio: f64::INFINITY,
+            timeline: Vec::with_capacity(MAX_TIMELINE_POINTS),
         })
     }
 
@@ -269,9 +306,16 @@ impl LoudnessAnalyzer {
                             let ratio = (win_peak * win_peak) / sum_s_joint_sq;
                             if ratio < self.min_psr_lin_ratio {
                                 self.min_psr_lin_ratio = ratio;
+                                self.min_psr_frame = Some(self.frames_seen);
+                            }
+                            if ratio < self.bucket_psr_min_ratio {
+                                self.bucket_psr_min_ratio = ratio;
                             }
                         }
                     }
+                }
+                if sum_s_joint_sq > self.bucket_sum_s_max {
+                    self.bucket_sum_s_max = sum_s_joint_sq;
                 }
                 for c in 0..ch_count {
                     if self.sum_3s[c] > self.max_sum_s_channels[c] {
@@ -280,11 +324,79 @@ impl LoudnessAnalyzer {
                 }
             }
 
+            if frame_abs_peak > self.bucket_peak_lin {
+                self.bucket_peak_lin = frame_abs_peak;
+            }
+            self.bucket_progress += 1;
+            if self.bucket_progress >= self.bucket_frames {
+                self.flush_timeline_bucket();
+            }
+
             self.resync_countdown -= 1;
             if self.resync_countdown == 0 {
                 self.resync_sums();
                 self.resync_countdown = w3s;
             }
+        }
+    }
+
+    fn flush_timeline_bucket(&mut self) {
+        let time_secs = (self.frames_seen as f64 / (self.sample_rate.max(1) as f64)) as f32;
+        let sppm_db = if self.bucket_peak_lin > 0.0 {
+            (20.0 * self.bucket_peak_lin.log10()) as f32
+        } else {
+            -120.0
+        };
+        let short_term_lufs = if self.bucket_sum_s_max > 0.0 {
+            let energy = self.bucket_sum_s_max / (self.w3s_frames as f64);
+            (LOUDNESS_OFFSET_LUFS + 10.0 * energy.log10()) as f32
+        } else {
+            -120.0
+        };
+        let psr_db = if self.bucket_psr_min_ratio.is_finite() && self.bucket_psr_min_ratio > 0.0 {
+            (-LOUDNESS_OFFSET_LUFS
+                + 10.0 * (self.bucket_psr_min_ratio * (self.w3s_frames as f64)).log10())
+                as f32
+        } else {
+            f32::NAN
+        };
+
+        self.timeline.push(TimelinePoint {
+            time_secs,
+            sppm_db,
+            short_term_lufs,
+            psr_db,
+        });
+
+        self.bucket_progress = 0;
+        self.bucket_peak_lin = 0.0;
+        self.bucket_sum_s_max = 0.0;
+        self.bucket_psr_min_ratio = f64::INFINITY;
+
+        if self.timeline.len() >= MAX_TIMELINE_POINTS {
+            let mut compacted = Vec::with_capacity(MAX_TIMELINE_POINTS / 2 + 1);
+            for pair in self.timeline.chunks(2) {
+                if pair.len() == 2 {
+                    let a = pair[0];
+                    let b = pair[1];
+                    let psr = match (a.psr_db.is_finite(), b.psr_db.is_finite()) {
+                        (true, true) => a.psr_db.min(b.psr_db),
+                        (true, false) => a.psr_db,
+                        (false, true) => b.psr_db,
+                        (false, false) => f32::NAN,
+                    };
+                    compacted.push(TimelinePoint {
+                        time_secs: b.time_secs,
+                        sppm_db: a.sppm_db.max(b.sppm_db),
+                        short_term_lufs: a.short_term_lufs.max(b.short_term_lufs),
+                        psr_db: psr,
+                    });
+                } else {
+                    compacted.push(pair[0]);
+                }
+            }
+            self.timeline = compacted;
+            self.bucket_frames = self.bucket_frames.saturating_mul(2);
         }
     }
 
@@ -316,6 +428,9 @@ impl LoudnessAnalyzer {
     }
 
     pub fn finalize(&mut self) -> LoudnessResults {
+        if self.bucket_progress > 0 {
+            self.flush_timeline_bucket();
+        }
         let integrated_lufs = self
             .joint_ebu
             .loudness_global()
@@ -372,6 +487,10 @@ impl LoudnessAnalyzer {
             0.0
         };
 
+        let min_psr_time_secs = self
+            .min_psr_frame
+            .map(|f| (f as f64) / (self.sample_rate.max(1) as f64));
+
         LoudnessResults {
             integrated_lufs,
             lra,
@@ -382,6 +501,8 @@ impl LoudnessAnalyzer {
             true_peaks_db,
             max_tpl_joint_db,
             min_psr,
+            min_psr_time_secs,
+            timeline: std::mem::take(&mut self.timeline),
         }
     }
 }
@@ -397,4 +518,6 @@ pub struct LoudnessResults {
     pub true_peaks_db: Vec<f64>,
     pub max_tpl_joint_db: f64,
     pub min_psr: f64,
+    pub min_psr_time_secs: Option<f64>,
+    pub timeline: Vec<TimelinePoint>,
 }

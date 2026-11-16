@@ -19,7 +19,17 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 SVG_PATH = ROOT / "assets" / "icon.svg"
 ICO_PATH = ROOT / "assets" / "icon.ico"
+ICNS_PATH = ROOT / "assets" / "icon.icns"
 ICO_SIZES = [16, 24, 32, 48, 64, 256]
+ICNS_TYPES = [
+    (16, b"icp4"),
+    (32, b"icp5"),
+    (64, b"ic12"),
+    (128, b"ic07"),
+    (256, b"ic08"),
+    (512, b"ic09"),
+    (1024, b"ic10"),
+]
 
 
 def parse_svg_path(d: str) -> mpath.Path:
@@ -213,11 +223,30 @@ def build_ico(master: Image.Image, sizes: list[int]) -> bytes:
     return bytes(header) + bytes(dir_entries) + bytes(payloads)
 
 
+def build_icns(master: Image.Image) -> bytes:
+    """Encode modern PNG-compressed Apple ICNS frames for macOS Finder & Dock."""
+    chunks = bytearray()
+    for sz, ostype in ICNS_TYPES:
+        resized = master.resize((sz, sz), Image.Resampling.LANCZOS)
+        bio = io.BytesIO()
+        resized.save(bio, format="PNG", optimize=True)
+        png_bytes = bio.getvalue()
+        chunks.extend(struct.pack(">4sI", ostype, 8 + len(png_bytes)))
+        chunks.extend(png_bytes)
+
+    total_len = 8 + len(chunks)
+    return struct.pack(">4sI", b"icns", total_len) + bytes(chunks)
+
+
 def main() -> None:
     master = render_svg_master(SVG_PATH, render_px=2048)
     ico_bytes = build_ico(master, ICO_SIZES)
     ICO_PATH.write_bytes(ico_bytes)
     print(f"Wrote {ICO_PATH.relative_to(ROOT)} ({len(ico_bytes):,} bytes, sizes={ICO_SIZES})")
+
+    icns_bytes = build_icns(master)
+    ICNS_PATH.write_bytes(icns_bytes)
+    print(f"Wrote {ICNS_PATH.relative_to(ROOT)} ({len(icns_bytes):,} bytes)")
 
 
 if __name__ == "__main__":

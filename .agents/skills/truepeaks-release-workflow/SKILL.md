@@ -17,10 +17,11 @@ Follow this checklist whenever preparing and publishing a new `TruePeaks` releas
    - Record all architectural changes, UI refinements, and test results in [`DEVELOPMENT_LOG.md`](../../../DEVELOPMENT_LOG.md).
    - Ensure [`README.md`](../../../README.md) reflects any new user-facing features or settings. If any ` ```math ` blocks in `README.md` changed, run `python scripts/render_math_svgs.py`.
 3. **Build & Run the Self-Contained Release Test Suite:**
-   - Run both commands (note `Cargo.toml` version bumps update `Cargo.lock` on the first build, after which `--locked` must pass cleanly with zero warnings):
+   - Run all verification commands (note `Cargo.toml` version bumps update `Cargo.lock` on the first build, after which `--locked` must pass cleanly with zero warnings across both GUI and standalone headless CLI binaries):
      ```powershell
      cargo build --release
-     cargo build --release --locked
+     cargo build --release --locked --bin truepeaks
+     cargo build --release --locked --no-default-features --bin truepeaks-cli
      cargo test --release --locked
      ```
    - Confirm **0 compiler warnings** and **0 failed tests**.

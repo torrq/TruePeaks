@@ -54,19 +54,19 @@ def parse_readme_math_blocks(readme_path: str) -> dict[int, list[str]]:
     with open(readme_path, "r", encoding="utf-8") as f:
         lines = f.read().splitlines()
 
-    sections: dict[int, list[str]] = {i: [] for i in range(1, 8)}
+    sections: dict[int, list[str]] = {i: [] for i in range(1, 9)}
     current_sec: int | None = None
     in_math = False
     buf: list[str] = []
 
     for line in lines:
-        sec_m = re.match(r"^###\s+([1-7])\.\s+", line)
+        sec_m = re.match(r"^###\s+([1-8])\.\s+", line)
         if sec_m and not in_math:
             current_sec = int(sec_m.group(1))
             continue
 
         if re.match(r"^##\s+", line) and not line.startswith("### ") and not in_math:
-            if current_sec == 7:
+            if current_sec == 8:
                 current_sec = None
             continue
 
@@ -88,7 +88,7 @@ def parse_readme_math_blocks(readme_path: str) -> dict[int, list[str]]:
 
 def render_svgs_with_mathjax(sections: dict[int, list[str]]) -> list[tuple[int, int, str, str]]:
     items: list[tuple[int, int, str]] = []
-    for sec in range(1, 8):
+    for sec in range(1, 9):
         for idx, tex in enumerate(sections[sec], start=1):
             items.append((sec, idx, tex))
 
@@ -241,7 +241,7 @@ def main() -> None:
 
     raw_bytes_total = 0
     gz_bytes_total = 0
-    per_section: dict[int, list[tuple[str, str, float, float]]] = {i: [] for i in range(1, 8)}
+    per_section: dict[int, list[tuple[str, str, float, float]]] = {i: [] for i in range(1, 9)}
 
     for sec, idx, _tex, svg_str in rendered:
         svg_bytes = svg_str.encode("utf-8")
@@ -271,7 +271,7 @@ def main() -> None:
         "",
     ]
 
-    for sec in range(1, 8):
+    for sec in range(1, 9):
         rust_lines.append(f"pub const SECTION_{sec}: &[MathSvgAsset] = &[")
         for eq_id, fname, w, h in per_section[sec]:
             rust_lines.extend(

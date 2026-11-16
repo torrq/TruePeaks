@@ -1,18 +1,27 @@
 use crate::config::{
-    AppConfig, CharsetMode, FolderColumnId, FolderColumnsConfig, FolderLogStyle, LineEndingMode,
-    SingleFileRowsConfig, SurroundFolderMode, ThemeMode, DEFAULT_WINDOW_HEIGHT,
-    DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
+    AppConfig, CharsetMode, DefaultResultsView, FolderColumnId, FolderColumnsConfig,
+    FolderLogStyle, LineEndingMode, SingleFileRowsConfig, SurroundFolderMode, ThemeMode,
+    DEFAULT_WINDOW_HEIGHT, DEFAULT_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH,
 };
+use crate::decoder::cue::is_cue_file;
 use crate::decoder::is_supported_audio_file;
-use crate::formatter::expand_filename_pattern;
+use crate::dsp::TrackAnalysis;
+use crate::formatter::export::{export_tracks, ExportFormat};
+use crate::formatter::folder_log::format_folder_log_ex;
+use crate::formatter::single_log::format_single_file_log;
+use crate::formatter::{expand_filename_pattern, normalize_nfc, write_log_file};
 use crate::math_assets::{self, MathSvgAsset};
 use crate::math_svg::{paint_math_svg, MathSvgCache};
-use crate::scanner::{spawn_scan_job, ScanEvent, ScanTarget};
+use crate::scanner::{spawn_scan_job, ScanEvent, ScanSnapshot, ScanTarget};
+use crate::visual_ui::{
+    render_compare_view, render_visual_results, ResultsViewTab, VisualColors, VisualState,
+};
 use crossbeam_channel::{unbounded, Receiver};
 use eframe::egui::{
     self, Align, Color32, CursorIcon, FontId, Frame, Key, Layout, Margin, Modifiers, RichText,
     Rounding, Sense, Stroke, Vec2,
 };
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,7 +29,7 @@ use std::time::{Duration, Instant};
 
 const AUDIO_FILE_EXTENSIONS: &[&str] = &[
     "wav", "bwf", "aiff", "aif", "aifc", "w64", "flac", "m4a", "alac", "mp4", "caf", "mp3", "aac",
-    "ogg", "oga",
+    "ogg", "oga", "cue",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +104,23 @@ struct Palette {
 }
 
 impl Palette {
+    fn to_visual_colors(self) -> VisualColors {
+        VisualColors {
+            dark: self.dark,
+            surface: self.surface,
+            surface_alt: self.surface_alt,
+            well: self.well,
+            border: self.border,
+            accent: self.accent,
+            accent_hover: self.accent_hover,
+            text_primary: self.text_primary,
+            text_muted: self.text_muted,
+            success: self.success,
+            warning: Color32::from_rgb(245, 166, 35),
+            error: self.error,
+        }
+    }
+
     fn for_theme(dark: bool) -> Self {
         if dark {
             Self {
@@ -172,9 +198,9 @@ fn build_visuals(dark: bool) -> egui::Visuals {
         pal.accent.r(),
         pal.accent.g(),
         pal.accent.b(),
-        if dark { 95 } else { 55 },
+        if dark { 85 } else { 50 },
     );
-    v.selection.stroke = Stroke::new(1.0_f32, pal.accent);
+    v.selection.stroke = Stroke::new(1.0_f32, pal.text_primary);
 
     let r = Rounding::same(6.0);
     v.widgets.noninteractive.bg_fill = pal.surface;
@@ -238,6 +264,8 @@ pub struct TruePeaksApp {
 
     // Active scan state
     is_scanning: bool,
+    skip_on_cancel: bool,
+    scan_queue: VecDeque<ScanTarget>,
     scan_rx: Option<Receiver<ScanEvent>>,
     cancel_flag: Option<Arc<AtomicBool>>,
     scan_start_instant: Option<Instant>,
@@ -252,6 +280,9 @@ pub struct TruePeaksApp {
     last_was_success: bool,
     last_saved_paths: Vec<PathBuf>,
     log_preview: String,
+    current_snapshot: Option<ScanSnapshot>,
+    recent_scans: Vec<ScanSnapshot>,
+    visual_state: VisualState,
     copied_at: Option<Instant>,
     about_tab: AboutTab,
     about_url_copied_at: Option<Instant>,
@@ -263,15 +294,50 @@ pub struct TruePeaksApp {
     window_save_pending_at: Option<Instant>,
 }
 
+fn scan_target_label(target: &ScanTarget) -> String {
+    let raw = match target {
+        ScanTarget::SingleFile(p) => p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Single File")
+            .to_string(),
+        ScanTarget::Folder(p) => p
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Album Folder")
+            .to_string(),
+        ScanTarget::Multi { dirs, files } => {
+            if !dirs.is_empty() && files.is_empty() {
+                format!("{} folders", dirs.len())
+            } else if dirs.is_empty() {
+                format!("{} files", files.len())
+            } else {
+                format!("{} folders, {} files", dirs.len(), files.len())
+            }
+        }
+    };
+    normalize_nfc(&raw)
+}
+
 impl TruePeaksApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, config: AppConfig) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        config: AppConfig,
+        initial_target: Option<ScanTarget>,
+    ) -> Self {
         configure_theme_styles(&cc.egui_ctx, config.theme);
         let max_len_input = config.log_filenames.max_length.to_string();
-        Self {
+        let visual_state = VisualState {
+            tab: ResultsViewTab::from_default(config.default_results_view),
+            ..VisualState::default()
+        };
+        let mut app = Self {
             config,
             active_view: ActiveView::Analyzer,
             settings_section: SettingsSection::Appearance,
             is_scanning: false,
+            skip_on_cancel: false,
+            scan_queue: VecDeque::new(),
             scan_rx: None,
             cancel_flag: None,
             scan_start_instant: None,
@@ -279,12 +345,15 @@ impl TruePeaksApp {
             progress_total: 0,
             current_target_label: String::new(),
             last_file_scanned: String::new(),
-            status_message: "Drop an audio file or album folder anywhere in the window to begin."
+            status_message: "Drop an audio file, album folder, or .cue sheet anywhere to begin."
                 .to_string(),
             last_was_error: false,
             last_was_success: false,
             last_saved_paths: Vec::new(),
             log_preview: String::new(),
+            current_snapshot: None,
+            recent_scans: Vec::new(),
+            visual_state,
             copied_at: None,
             about_tab: AboutTab::Overview,
             about_url_copied_at: None,
@@ -292,7 +361,11 @@ impl TruePeaksApp {
             max_len_input,
             window_frames_seen: 0,
             window_save_pending_at: None,
+        };
+        if let Some(target) = initial_target {
+            app.start_scan(target);
         }
+        app
     }
 
     fn track_window_geometry(&mut self, ctx: &egui::Context) {
@@ -393,23 +466,25 @@ impl TruePeaksApp {
     }
 
     fn pick_and_scan_file(&mut self) {
-        if self.is_scanning {
-            return;
-        }
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Audio Files", AUDIO_FILE_EXTENSIONS)
             .pick_file()
         {
-            self.start_scan(ScanTarget::SingleFile(path));
+            self.enqueue_or_start_scan(ScanTarget::SingleFile(path));
         }
     }
 
     fn pick_and_scan_folder(&mut self) {
-        if self.is_scanning {
-            return;
-        }
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            self.start_scan(ScanTarget::Folder(dir));
+            self.enqueue_or_start_scan(ScanTarget::Folder(dir));
+        }
+    }
+
+    fn enqueue_or_start_scan(&mut self, target: ScanTarget) {
+        if self.is_scanning {
+            self.scan_queue.push_back(target);
+        } else {
+            self.start_scan(target);
         }
     }
 
@@ -417,32 +492,13 @@ impl TruePeaksApp {
         if self.is_scanning {
             return;
         }
-        let target_label = match &target {
-            ScanTarget::SingleFile(p) => p
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Single File")
-                .to_string(),
-            ScanTarget::Folder(p) => p
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Album Folder")
-                .to_string(),
-            ScanTarget::Multi { dirs, files } => {
-                if !dirs.is_empty() && files.is_empty() {
-                    format!("{} folders", dirs.len())
-                } else if dirs.is_empty() {
-                    format!("{} files", files.len())
-                } else {
-                    format!("{} folders, {} files", dirs.len(), files.len())
-                }
-            }
-        };
+        let target_label = scan_target_label(&target);
 
         let (tx, rx) = unbounded();
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.active_view = ActiveView::Analyzer;
         self.is_scanning = true;
+        self.skip_on_cancel = false;
         self.scan_rx = Some(rx);
         self.cancel_flag = Some(cancel_flag.clone());
         self.scan_start_instant = Some(Instant::now());
@@ -459,7 +515,8 @@ impl TruePeaksApp {
         spawn_scan_job(target, self.config.clone(), cancel_flag, tx);
     }
 
-    fn cancel_active_scan(&mut self) {
+    fn cancel_active_scan(&mut self, skip_to_next: bool) {
+        self.skip_on_cancel = skip_to_next;
         if let Some(ref flag) = self.cancel_flag {
             flag.store(true, Ordering::Relaxed);
         }
@@ -470,17 +527,82 @@ impl TruePeaksApp {
             return;
         }
         self.log_preview.clear();
+        self.current_snapshot = None;
         self.last_saved_paths.clear();
         self.last_was_error = false;
         self.last_was_success = false;
         self.copied_at = None;
         self.current_target_label.clear();
         self.status_message =
-            "Drop an audio file or album folder anywhere in the window to begin.".to_string();
+            "Drop an audio file, album folder, or .cue sheet anywhere to begin.".to_string();
+    }
+
+    fn refresh_log_preview_from_snapshot(&mut self) {
+        if let Some(ref snap) = self.current_snapshot {
+            self.log_preview = snap.render_text(&self.config);
+        }
+    }
+
+    fn save_export_dialog(&mut self, fmt: Option<ExportFormat>) {
+        let Some(ref snap) = self.current_snapshot else {
+            return;
+        };
+        let (ext, filter_name, content) = match fmt {
+            None => ("txt", "Text Log", self.log_preview.clone()),
+            Some(ef) => {
+                let txt = export_tracks(
+                    &snap.title(),
+                    &snap.owned_tracks(),
+                    ef,
+                    &self.config.log_filenames,
+                    self.config.use_embedded_tags,
+                    self.config.surround_folder_mode,
+                );
+                let (ext, name) = match ef {
+                    ExportFormat::Csv => ("csv", "CSV Spreadsheet"),
+                    ExportFormat::Markdown => ("md", "Markdown Table"),
+                    ExportFormat::Json => ("json", "JSON Report"),
+                };
+                (ext, name, txt)
+            }
+        };
+
+        let safe_stem: String = snap
+            .title()
+            .chars()
+            .map(|c| if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') { '_' } else { c })
+            .collect();
+        let default_name = format!("{}.{}", if safe_stem.is_empty() { "truepeaks" } else { &safe_stem }, ext);
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .add_filter(filter_name, &[ext])
+            .save_file()
+        {
+            match write_log_file(
+                &path,
+                &content,
+                self.config.charset,
+                self.config.line_ending,
+                true,
+            ) {
+                Ok(written) => {
+                    self.last_saved_paths = vec![written.clone()];
+                    self.last_was_error = false;
+                    self.last_was_success = true;
+                    self.status_message = format!("Exported report to {}", written.display());
+                }
+                Err(e) => {
+                    self.last_was_error = true;
+                    self.last_was_success = false;
+                    self.status_message = format!("Export failed: {}", e);
+                }
+            }
+        }
     }
 
     fn poll_scan_events(&mut self) {
         let mut finished = false;
+        let mut was_cancelled = false;
         if let Some(ref rx) = self.scan_rx {
             while let Ok(ev) = rx.try_recv() {
                 match ev {
@@ -507,12 +629,21 @@ impl TruePeaksApp {
                     }
                     ScanEvent::Completed {
                         log_text,
+                        snapshot,
                         saved_paths,
                         elapsed_secs,
                         tracks_count,
                         folders_count,
                     } => {
                         self.log_preview = log_text;
+                        self.visual_state.selected_track = 0;
+                        self.recent_scans.retain(|s| s.title() != snapshot.title());
+                        self.recent_scans.insert(0, snapshot.clone());
+                        if self.recent_scans.len() > 16 {
+                            self.recent_scans.truncate(16);
+                        }
+                        self.current_snapshot = Some(snapshot);
+
                         let saved_cnt = saved_paths.len();
                         self.last_saved_paths = saved_paths;
                         self.progress_completed = self.progress_total;
@@ -541,6 +672,7 @@ impl TruePeaksApp {
                         self.last_was_error = false;
                         self.last_was_success = false;
                         self.status_message = "Scan cancelled.".to_string();
+                        was_cancelled = true;
                         finished = true;
                     }
                     ScanEvent::Error(err) => {
@@ -557,13 +689,16 @@ impl TruePeaksApp {
             self.scan_rx = None;
             self.cancel_flag = None;
             self.scan_start_instant = None;
+            let skip = std::mem::take(&mut self.skip_on_cancel);
+            if was_cancelled && !skip {
+                self.scan_queue.clear();
+            } else if let Some(next_target) = self.scan_queue.pop_front() {
+                self.start_scan(next_target);
+            }
         }
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        if self.is_scanning {
-            return;
-        }
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
             return;
@@ -579,7 +714,7 @@ impl TruePeaksApp {
                     if !dirs.contains(&path) {
                         dirs.push(path);
                     }
-                } else if is_supported_audio_file(&path) {
+                } else if is_supported_audio_file(&path) || is_cue_file(&path) {
                     if !files.contains(&path) {
                         files.push(path);
                     }
@@ -593,11 +728,11 @@ impl TruePeaksApp {
         files.sort();
 
         if dirs.len() == 1 && files.is_empty() {
-            self.start_scan(ScanTarget::Folder(dirs.into_iter().next().unwrap()));
+            self.enqueue_or_start_scan(ScanTarget::Folder(dirs.into_iter().next().unwrap()));
         } else if dirs.is_empty() && files.len() == 1 {
-            self.start_scan(ScanTarget::SingleFile(files.into_iter().next().unwrap()));
+            self.enqueue_or_start_scan(ScanTarget::SingleFile(files.into_iter().next().unwrap()));
         } else if !dirs.is_empty() || !files.is_empty() {
-            self.start_scan(ScanTarget::Multi { dirs, files });
+            self.enqueue_or_start_scan(ScanTarget::Multi { dirs, files });
         } else if let Some(bad) = first_bad {
             self.last_was_error = true;
             self.last_was_success = false;
@@ -624,15 +759,17 @@ impl TruePeaksApp {
         } else if open_file {
             self.pick_and_scan_file();
         } else if toggle_settings {
-            self.active_view = if self.active_view == ActiveView::Settings {
-                ActiveView::Analyzer
+            if self.active_view == ActiveView::Settings {
+                self.refresh_log_preview_from_snapshot();
+                self.active_view = ActiveView::Analyzer;
             } else {
-                ActiveView::Settings
-            };
+                self.active_view = ActiveView::Settings;
+            }
         } else if escape {
             if self.is_scanning {
-                self.cancel_active_scan();
+                self.cancel_active_scan(false);
             } else if self.active_view != ActiveView::Analyzer {
+                self.refresh_log_preview_from_snapshot();
                 self.active_view = ActiveView::Analyzer;
             }
         }
@@ -715,26 +852,29 @@ impl TruePeaksApp {
 
                     ui.separator();
 
-                    let can_pick = !self.is_scanning;
+                    let can_clear = !self.is_scanning;
                     if ui
-                        .add_enabled(
-                            can_pick,
-                            primary_button("Select Folder...", can_pick, pal)
+                        .add(
+                            primary_button("Select Folder...", true, pal)
                                 .min_size(Vec2::new(0.0, 28.0)),
                         )
-                        .on_hover_text("Analyze an album folder (Ctrl+Shift+O)")
+                        .on_hover_text(if self.is_scanning {
+                            "Queue an album folder for analysis (Ctrl+Shift+O)"
+                        } else {
+                            "Analyze an album folder (Ctrl+Shift+O)"
+                        })
                         .clicked()
                     {
                         self.pick_and_scan_folder();
                     }
 
                     if ui
-                        .add_enabled(
-                            can_pick,
-                            egui::Button::new("Select File...")
-                                .min_size(Vec2::new(0.0, 28.0)),
-                        )
-                        .on_hover_text("Analyze a single audio file (Ctrl+O)")
+                        .add(egui::Button::new("Select File...").min_size(Vec2::new(0.0, 28.0)))
+                        .on_hover_text(if self.is_scanning {
+                            "Queue a single audio file or .cue sheet (Ctrl+O)"
+                        } else {
+                            "Analyze a single audio file or .cue sheet (Ctrl+O)"
+                        })
                         .clicked()
                     {
                         self.pick_and_scan_file();
@@ -748,10 +888,14 @@ impl TruePeaksApp {
                                 )
                                 .min_size(Vec2::new(0.0, 28.0)),
                             )
-                            .on_hover_text("Abort the current analysis (Esc)")
+                            .on_hover_text(if self.scan_queue.is_empty() {
+                                "Abort the current analysis (Esc)"
+                            } else {
+                                "Abort current scan and clear queue (Esc)"
+                            })
                             .clicked()
                     {
-                        self.cancel_active_scan();
+                        self.cancel_active_scan(false);
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -768,6 +912,7 @@ impl TruePeaksApp {
                             .on_hover_text("Return to the analyzer view (Esc)")
                             .clicked()
                             {
+                                self.refresh_log_preview_from_snapshot();
                                 self.active_view = ActiveView::Analyzer;
                             }
                             if self.active_view == ActiveView::About
@@ -809,13 +954,34 @@ impl TruePeaksApp {
                         if self.active_view == ActiveView::Analyzer && !self.log_preview.is_empty() {
                             if ui
                                 .add_enabled(
-                                    can_pick,
+                                    can_clear,
                                     egui::Button::new("Clear").min_size(Vec2::new(0.0, 28.0)),
                                 )
                                 .on_hover_text("Clear preview and return to start screen")
                                 .clicked()
                             {
                                 self.clear_preview();
+                            }
+
+                            if self.current_snapshot.is_some() {
+                                ui.menu_button("Export...", |ui| {
+                                    if ui.button("Save Text Log (.txt)...").clicked() {
+                                        self.save_export_dialog(None);
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Export CSV (.csv)...").clicked() {
+                                        self.save_export_dialog(Some(ExportFormat::Csv));
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Export Markdown (.md)...").clicked() {
+                                        self.save_export_dialog(Some(ExportFormat::Markdown));
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Export JSON (.json)...").clicked() {
+                                        self.save_export_dialog(Some(ExportFormat::Json));
+                                        ui.close_menu();
+                                    }
+                                });
                             }
 
                             let recently_copied = self
@@ -825,19 +991,28 @@ impl TruePeaksApp {
                             if recently_copied {
                                 ctx.request_repaint();
                             }
-                            let copy_btn = if recently_copied {
-                                egui::Button::new(
-                                    RichText::new("✓ Copied").color(pal.success),
+                            let copy_clicked = if recently_copied {
+                                svg_status_button(
+                                    ui,
+                                    ctx,
+                                    &mut self.math_svg_cache,
+                                    "check",
+                                    include_bytes!("../assets/check.svg"),
+                                    "Copied",
+                                    28.0,
+                                    pal.success,
+                                    pal,
                                 )
-                                .stroke(Stroke::new(1.0_f32, pal.success))
-                            } else {
-                                egui::Button::new("Copy Log")
-                            };
-                            if ui
-                                .add(copy_btn.min_size(Vec2::new(0.0, 28.0)))
                                 .on_hover_text("Copy log output to clipboard")
                                 .clicked()
-                            {
+                            } else {
+                                ui.add(
+                                    egui::Button::new("Copy Log").min_size(Vec2::new(0.0, 28.0)),
+                                )
+                                .on_hover_text("Copy log output to clipboard")
+                                .clicked()
+                            };
+                            if copy_clicked {
                                 ctx.copy_text(self.log_preview.clone());
                                 self.copied_at = Some(Instant::now());
                             }
@@ -847,7 +1022,7 @@ impl TruePeaksApp {
             });
     }
 
-    fn render_bottom_status_bar(&self, ctx: &egui::Context, pal: &Palette) {
+    fn render_bottom_status_bar(&mut self, ctx: &egui::Context, pal: &Palette) {
         let frame = Frame::none()
             .fill(pal.surface)
             .inner_margin(Margin::symmetric(14.0, 9.0))
@@ -1080,6 +1255,117 @@ impl TruePeaksApp {
                         }
                     });
                 }
+
+                if !self.scan_queue.is_empty() {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    let mut remove_idx: Option<usize> = None;
+                    let mut clear_all = false;
+                    let mut skip_curr = false;
+
+                    ui.horizontal(|ui| {
+                        let accent_text = if pal.dark {
+                            pal.accent_hover
+                        } else {
+                            pal.accent
+                        };
+                        ui.label(
+                            RichText::new(format!("Queue ({}):", self.scan_queue.len()))
+                                .size(12.5)
+                                .strong()
+                                .color(accent_text),
+                        );
+
+                        let right_w = if self.is_scanning { 180.0 } else { 96.0 };
+                        let chips_max_w = (ui.available_width() - right_w).max(120.0);
+                        ui.scope(|ui| {
+                            ui.set_max_width(chips_max_w);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                                for (idx, item) in self.scan_queue.iter().enumerate() {
+                                    let lbl = scan_target_label(item);
+                                    let short_lbl = if lbl.chars().count() > 26 {
+                                        let cut: String = lbl.chars().take(24).collect();
+                                        format!("{}..", cut.trim_end())
+                                    } else {
+                                        lbl.clone()
+                                    };
+                                    Frame::none()
+                                        .fill(pal.well)
+                                        .rounding(Rounding::same(5.0))
+                                        .stroke(Stroke::new(1.0_f32, pal.border))
+                                        .inner_margin(Margin::symmetric(7.0, 2.0))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 5.0;
+                                                ui.label(
+                                                    RichText::new(short_lbl)
+                                                        .size(12.0)
+                                                        .color(pal.text_primary),
+                                                )
+                                                .on_hover_text(lbl);
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new("×")
+                                                                .size(12.0)
+                                                                .color(pal.text_muted),
+                                                        )
+                                                        .frame(false)
+                                                        .min_size(Vec2::new(14.0, 14.0)),
+                                                    )
+                                                    .on_hover_text("Remove from queue")
+                                                    .clicked()
+                                                {
+                                                    remove_idx = Some(idx);
+                                                }
+                                            });
+                                        });
+                                }
+                            });
+                        });
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Clear Queue")
+                                            .size(12.0)
+                                            .color(pal.error),
+                                    )
+                                    .min_size(Vec2::new(0.0, 22.0)),
+                                )
+                                .on_hover_text("Remove all pending items from queue")
+                                .clicked()
+                            {
+                                clear_all = true;
+                            }
+                            if self.is_scanning
+                                && ui
+                                    .add(
+                                        egui::Button::new(RichText::new("Skip Current").size(12.0))
+                                            .min_size(Vec2::new(0.0, 22.0)),
+                                    )
+                                    .on_hover_text(
+                                        "Cancel current scan and start the next queued item",
+                                    )
+                                    .clicked()
+                            {
+                                skip_curr = true;
+                            }
+                        });
+                    });
+
+                    if clear_all {
+                        self.scan_queue.clear();
+                    } else if let Some(idx) = remove_idx {
+                        self.scan_queue.remove(idx);
+                    }
+                    if skip_curr {
+                        self.cancel_active_scan(true);
+                    }
+                }
             });
     }
 
@@ -1104,8 +1390,7 @@ impl TruePeaksApp {
             ActiveView::Analyzer => {}
         }
 
-        let is_hovering_drop =
-            !self.is_scanning && ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let is_hovering_drop = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
         let resp = egui::CentralPanel::default()
             .frame(Frame::none().fill(pal.canvas).inner_margin(Margin::same(14.0)))
@@ -1113,7 +1398,7 @@ impl TruePeaksApp {
                 if self.log_preview.is_empty() && !self.is_scanning {
                     self.render_empty_drop_zone(ui, pal);
                 } else {
-                    self.render_log_viewer(ui, pal);
+                    self.render_log_viewer(ui, ctx, pal);
                 }
             });
 
@@ -1139,10 +1424,15 @@ impl TruePeaksApp {
                 pal.surface,
                 Stroke::new(1.5_f32, pal.accent),
             );
+            let overlay_msg = if self.is_scanning {
+                "Release to add to scan queue"
+            } else {
+                "Release to analyze audio file(s) or folder(s)"
+            };
             painter.text(
                 badge_center,
                 egui::Align2::CENTER_CENTER,
-                "Release to analyze audio file(s) or folder(s)",
+                overlay_msg,
                 FontId::proportional(16.0),
                 pal.text_primary,
             );
@@ -1214,7 +1504,7 @@ impl TruePeaksApp {
                         ui.add_space(16.0);
                         ui.label(
                             RichText::new(
-                                "WAV · BWF · W64 · AIFF · FLAC · ALAC · MP3 · AAC · Ogg   |   Mono–7.1+ · 44.1–384 kHz",
+                                "WAV · BWF · W64 · AIFF · FLAC · ALAC · MP3 · AAC · Ogg · CUE   |   Mono–7.1+ · 44.1–384 kHz",
                             )
                             .size(12.0)
                             .color(pal.text_muted),
@@ -1225,66 +1515,329 @@ impl TruePeaksApp {
                                 .size(11.5)
                                 .color(pal.text_muted),
                         );
+
+                        if !self.recent_scans.is_empty() {
+                            ui.add_space(14.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("Recent Scans")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(pal.text_muted),
+                            );
+                            ui.add_space(4.0);
+                            let mut restore_snap: Option<ScanSnapshot> = None;
+                            ui.horizontal_wrapped(|ui| {
+                                for snap in &self.recent_scans {
+                                    if ui
+                                        .button(RichText::new(snap.title()).size(12.0))
+                                        .clicked()
+                                    {
+                                        restore_snap = Some(snap.clone());
+                                    }
+                                }
+                            });
+                            if let Some(snap) = restore_snap {
+                                self.current_target_label = snap.title();
+                                self.log_preview = snap.render_text(&self.config);
+                                self.current_snapshot = Some(snap);
+                                self.visual_state.selected_track = 0;
+                            }
+                        }
                     });
                 });
         });
     }
 
-    fn render_log_viewer(&mut self, ui: &mut egui::Ui, pal: &Palette) {
+    fn render_log_viewer(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, pal: &Palette) {
         let outer_frame = Frame::none()
             .fill(pal.well)
             .rounding(Rounding::same(8.0))
             .stroke(Stroke::new(1.0_f32, pal.border));
 
         outer_frame.show(ui, |ui| {
-            // Subtle preview header bar (target label + monospace font zoom)
+            // Preview header bar: target title + Text/Visual/Compare tabs + Recent + zoom
             Frame::none()
                 .fill(pal.surface)
                 .inner_margin(Margin::symmetric(12.0, 6.0))
                 .stroke(Stroke::new(1.0_f32, pal.border))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        let tab_pill = |ui: &mut egui::Ui, lbl: &str, selected: bool| -> bool {
+                            let btn = egui::Button::new(
+                                RichText::new(lbl).size(12.5).color(if selected {
+                                    pal.pill_active_text
+                                } else {
+                                    pal.pill_inactive_text
+                                }),
+                            )
+                            .fill(if selected {
+                                pal.pill_active_fill
+                            } else {
+                                pal.pill_inactive_fill
+                            })
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                if selected {
+                                    pal.pill_active_fill
+                                } else {
+                                    pal.pill_inactive_border
+                                },
+                            ))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(0.0, 24.0));
+                            ui.add(btn).clicked()
+                        };
+
                         let title = if self.current_target_label.is_empty() {
                             "Analysis Log".to_string()
                         } else {
                             self.current_target_label.clone()
                         };
-                        ui.label(
-                            RichText::new(title)
-                                .size(13.5)
-                                .strong()
-                                .color(pal.text_primary),
-                        );
+                        let right_reserve = 140.0
+                            + if self.current_snapshot.is_some() { 104.0 } else { 0.0 }
+                            + if self.visual_state.tab == ResultsViewTab::TextLog {
+                                122.0
+                            } else {
+                                0.0
+                            };
+                        let tabs_reserve = if self.current_snapshot.is_some() { 196.0 } else { 0.0 };
+                        let title_max = (ui.available_width() - right_reserve - tabs_reserve).max(80.0);
+                        ui.scope(|ui| {
+                            ui.set_max_width(title_max);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&title)
+                                        .size(13.5)
+                                        .strong()
+                                        .color(pal.text_primary),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&title);
+                        });
+
+                        if self.current_snapshot.is_some() {
+                            ui.separator();
+                            for (tab, lbl) in [
+                                (ResultsViewTab::VisualView, "Visual View"),
+                                (ResultsViewTab::TextLog, "Text Log"),
+                            ] {
+                                if tab_pill(ui, lbl, self.visual_state.tab == tab) {
+                                    self.visual_state.tab = tab;
+                                }
+                            }
+                        }
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("A+").size(12.5))
-                                        .min_size(Vec2::new(28.0, 22.0)),
-                                )
-                                .on_hover_text("Increase log font size")
-                                .clicked()
-                            {
-                                self.config.log_font_size =
-                                    (self.config.log_font_size + 1.0).min(22.0);
-                                let _ = self.config.save();
+                            // Far right: always show Recent selector cleanly, auto-sized to all items
+                            let has_recent = self.recent_scans.len() > 1;
+                            let popup_id = ui.make_persistent_id("recent_scans_popup");
+                            let is_open = ui.memory(|m| m.is_popup_open(popup_id));
+                            if !has_recent && is_open {
+                                ui.memory_mut(|m| m.close_popup());
                             }
-                            ui.label(
-                                RichText::new(format!("{:.0} pt", self.config.log_font_size))
-                                    .size(12.5)
-                                    .color(pal.text_muted),
+
+                            let recent_label = if self.recent_scans.is_empty() {
+                                "Recent    ".to_string()
+                            } else {
+                                format!("Recent ({})    ", self.recent_scans.len())
+                            };
+                            let btn = egui::Button::new(
+                                RichText::new(recent_label).size(12.5).color(if has_recent {
+                                    pal.text_primary
+                                } else {
+                                    pal.text_muted
+                                }),
+                            )
+                            .fill(if is_open && has_recent {
+                                pal.surface_alt
+                            } else {
+                                pal.pill_inactive_fill
+                            })
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                if is_open && has_recent {
+                                    pal.accent
+                                } else {
+                                    pal.pill_inactive_border
+                                },
+                            ))
+                            .rounding(Rounding::same(6.0))
+                            .min_size(Vec2::new(112.0, 24.0));
+                            let btn_resp = ui.add_enabled(has_recent, btn);
+                            // Paint crisp downward chevron triangle on right edge of trigger
+                            let caret_c = egui::pos2(
+                                btn_resp.rect.right() - 12.0,
+                                btn_resp.rect.center().y + 1.0,
                             );
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("A-").size(12.5))
-                                        .min_size(Vec2::new(28.0, 22.0)),
+                            let caret_col = if has_recent {
+                                pal.text_primary
+                            } else {
+                                pal.text_muted
+                            };
+                            ui.painter().add(egui::Shape::convex_polygon(
+                                vec![
+                                    egui::pos2(caret_c.x - 3.5, caret_c.y - 2.0),
+                                    egui::pos2(caret_c.x + 3.5, caret_c.y - 2.0),
+                                    egui::pos2(caret_c.x, caret_c.y + 2.5),
+                                ],
+                                caret_col,
+                                Stroke::NONE,
+                            ));
+                            if !has_recent {
+                                btn_resp.clone().on_disabled_hover_text(
+                                    "Scan 2 or more items in a session to switch recent results here.",
+                                );
+                            }
+                            if btn_resp.clicked() && has_recent {
+                                ui.memory_mut(|m| m.toggle_popup(popup_id));
+                            }
+
+                            let mut chosen_idx: Option<usize> = None;
+                            if has_recent && ui.memory(|m| m.is_popup_open(popup_id)) {
+                                let anchor = btn_resp.rect.right_bottom() + Vec2::new(0.0, 4.0);
+                                let cur_title = self
+                                    .current_snapshot
+                                    .as_ref()
+                                    .map(|s| s.title())
+                                    .unwrap_or_default();
+                                let visible_rows = self.recent_scans.len().clamp(1, 12) as f32;
+                                let desired_h = (visible_rows * 27.0 + 18.0).min(380.0);
+                                let area_resp = egui::Area::new(egui::Id::new((
+                                    "recent_scans_area",
+                                    self.recent_scans.len(),
+                                )))
+                                .kind(egui::UiKind::Popup)
+                                .order(egui::Order::Foreground)
+                                .pivot(egui::Align2::RIGHT_TOP)
+                                .fixed_pos(anchor)
+                                .default_size(Vec2::new(300.0, desired_h))
+                                .constrain(true)
+                                .show(ctx, |ui| {
+                                    Frame::popup(ui.style())
+                                        .fill(pal.surface)
+                                        .stroke(Stroke::new(1.0_f32, pal.border))
+                                        .rounding(Rounding::same(8.0))
+                                        .inner_margin(Margin::same(6.0))
+                                        .show(ui, |ui| {
+                                            ui.with_layout(
+                                                Layout::top_down_justified(Align::LEFT),
+                                                |ui| {
+                                                    ui.set_min_width(240.0);
+                                                    ui.set_max_width(440.0);
+                                                    let mut render_items = |ui: &mut egui::Ui| {
+                                                        ui.spacing_mut().item_spacing.y = 2.0;
+                                                        for (idx, snap) in
+                                                            self.recent_scans.iter().enumerate()
+                                                        {
+                                                            let snap_title = snap.title();
+                                                            let is_active = snap_title == cur_title;
+                                                            let item_btn = egui::Button::new(
+                                                                RichText::new(&snap_title)
+                                                                    .size(12.5)
+                                                                    .color(if is_active {
+                                                                        pal.pill_active_text
+                                                                    } else {
+                                                                        pal.text_primary
+                                                                    }),
+                                                            )
+                                                            .wrap_mode(egui::TextWrapMode::Truncate)
+                                                            .fill(if is_active {
+                                                                pal.pill_active_fill
+                                                            } else {
+                                                                Color32::TRANSPARENT
+                                                            })
+                                                            .stroke(Stroke::NONE)
+                                                            .rounding(Rounding::same(5.0))
+                                                            .min_size(Vec2::new(228.0, 24.0));
+                                                            if ui
+                                                                .add(item_btn)
+                                                                .on_hover_text(&snap_title)
+                                                                .clicked()
+                                                            {
+                                                                chosen_idx = Some(idx);
+                                                            }
+                                                        }
+                                                    };
+
+                                                    if self.recent_scans.len() > 12 {
+                                                        egui::ScrollArea::vertical()
+                                                            .id_salt((
+                                                                "recent_scans_scroll",
+                                                                self.recent_scans.len(),
+                                                            ))
+                                                            .min_scrolled_height(300.0)
+                                                            .max_height(380.0)
+                                                            .show(ui, render_items);
+                                                    } else {
+                                                        render_items(ui);
+                                                    }
+                                                },
+                                            );
+                                        });
+                                });
+
+                                let esc = ui.input(|i| i.key_pressed(Key::Escape));
+                                let outside = !btn_resp.clicked()
+                                    && btn_resp.clicked_elsewhere()
+                                    && area_resp.response.clicked_elsewhere();
+                                if chosen_idx.is_some() || esc || outside {
+                                    ui.memory_mut(|m| m.close_popup());
+                                }
+                            }
+
+                            if let Some(idx) = chosen_idx {
+                                if let Some(snap) = self.recent_scans.get(idx).cloned() {
+                                    self.current_target_label = snap.title();
+                                    self.log_preview = snap.render_text(&self.config);
+                                    self.current_snapshot = Some(snap);
+                                    self.visual_state.selected_track = 0;
+                                }
+                            }
+
+                            if self.current_snapshot.is_some()
+                                && tab_pill(
+                                    ui,
+                                    "Compare A/B",
+                                    self.visual_state.tab == ResultsViewTab::CompareAb,
                                 )
-                                .on_hover_text("Decrease log font size")
-                                .clicked()
                             {
-                                self.config.log_font_size =
-                                    (self.config.log_font_size - 1.0).max(10.0);
-                                let _ = self.config.save();
+                                self.visual_state.tab = ResultsViewTab::CompareAb;
+                            }
+
+                            if self.visual_state.tab == ResultsViewTab::TextLog {
+                                ui.separator();
+                                if ui
+                                    .add(
+                                        egui::Button::new(RichText::new("A+").size(12.5))
+                                            .min_size(Vec2::new(28.0, 22.0)),
+                                    )
+                                    .on_hover_text("Increase log font size")
+                                    .clicked()
+                                {
+                                    self.config.log_font_size =
+                                        (self.config.log_font_size + 1.0).min(22.0);
+                                    let _ = self.config.save();
+                                }
+                                ui.label(
+                                    RichText::new(format!("{:.0} pt", self.config.log_font_size))
+                                        .size(12.5)
+                                        .color(pal.text_muted),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new(RichText::new("A-").size(12.5))
+                                            .min_size(Vec2::new(28.0, 22.0)),
+                                    )
+                                    .on_hover_text("Decrease log font size")
+                                    .clicked()
+                                {
+                                    self.config.log_font_size =
+                                        (self.config.log_font_size - 1.0).max(10.0);
+                                    let _ = self.config.save();
+                                }
                             }
                         });
                     });
@@ -1293,6 +1846,66 @@ impl TruePeaksApp {
             Frame::none()
                 .inner_margin(Margin::same(10.0))
                 .show(ui, |ui| {
+                    if self.is_scanning
+                        && self.log_preview.is_empty()
+                        && self.current_snapshot.is_none()
+                    {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space((ui.available_height() * 0.38).max(24.0));
+                            ui.label(
+                                RichText::new(format!(
+                                    "Analyzing {}...",
+                                    if self.current_target_label.is_empty() {
+                                        "audio"
+                                    } else {
+                                        &self.current_target_label
+                                    }
+                                ))
+                                .size(16.0)
+                                .strong()
+                                .color(pal.text_primary),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(&self.status_message)
+                                    .size(13.0)
+                                    .color(pal.text_muted),
+                            );
+                        });
+                        return;
+                    }
+
+                    match self.visual_state.tab {
+                        ResultsViewTab::VisualView => {
+                            if let Some(ref snap) = self.current_snapshot {
+                                let vpal = pal.to_visual_colors();
+                                render_visual_results(
+                                    ui,
+                                    snap,
+                                    &self.config,
+                                    &mut self.visual_state,
+                                    &vpal,
+                                );
+                                return;
+                            }
+                        }
+                        ResultsViewTab::CompareAb => {
+                            let vpal = pal.to_visual_colors();
+                            render_compare_view(
+                                ui,
+                                ctx,
+                                self.current_snapshot.as_ref(),
+                                &self.recent_scans,
+                                &self.config,
+                                &mut self.visual_state,
+                                &vpal,
+                                &mut self.math_svg_cache,
+                            );
+                            return;
+                        }
+                        ResultsViewTab::TextLog => {}
+                    }
+
                     let font_size = self.config.log_font_size;
                     let text_color = pal.text_primary;
                     let mut layouter = |ui: &egui::Ui, string: &str, _wrap_width: f32| {
@@ -1474,16 +2087,29 @@ impl TruePeaksApp {
                         )
                         .on_hover_text("Open TruePeaks on GitHub in your browser");
 
-                        let copy_lbl = if url_copied {
-                            RichText::new("✓ Copied").size(12.0).color(pal.success)
-                        } else {
-                            RichText::new("Copy").size(12.0)
-                        };
-                        if ui
-                            .add(egui::Button::new(copy_lbl).min_size(Vec2::new(0.0, 22.0)))
+                        let copy_clicked = if url_copied {
+                            svg_status_button(
+                                ui,
+                                ctx,
+                                &mut self.math_svg_cache,
+                                "check",
+                                include_bytes!("../assets/check.svg"),
+                                "Copied",
+                                22.0,
+                                pal.success,
+                                pal,
+                            )
                             .on_hover_text("Copy repository URL to clipboard")
                             .clicked()
-                        {
+                        } else {
+                            ui.add(
+                                egui::Button::new(RichText::new("Copy").size(12.0))
+                                    .min_size(Vec2::new(0.0, 22.0)),
+                            )
+                            .on_hover_text("Copy repository URL to clipboard")
+                            .clicked()
+                        };
+                        if copy_clicked {
                             ctx.copy_text(repo_url.to_string());
                             self.about_url_copied_at = Some(Instant::now());
                         }
@@ -1533,7 +2159,7 @@ impl TruePeaksApp {
                 ui.add_space(6.0);
                 about_kv_row(ui, pal, "Formats", |ui| {
                     ui.label(
-                        RichText::new("WAV, BWF, AIFF, Wave64, FLAC, ALAC, CAF, MP3, AAC, Ogg")
+                        RichText::new("WAV, BWF, AIFF, Wave64, FLAC, ALAC, CAF, MP3, AAC, Ogg, CUE")
                             .size(13.0)
                             .color(pal.text_primary),
                     );
@@ -1576,13 +2202,18 @@ impl TruePeaksApp {
 
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("Open GitHub ↗").size(13.5))
-                        .min_size(Vec2::new(0.0, 30.0)),
-                )
-                .on_hover_text(repo_url)
-                .clicked()
+            if svg_action_button(
+                ui,
+                ctx,
+                &mut self.math_svg_cache,
+                "external_link",
+                include_bytes!("../assets/external_link.svg"),
+                "Open GitHub",
+                30.0,
+                pal,
+            )
+            .on_hover_text(repo_url)
+            .clicked()
             {
                 ctx.open_url(egui::OpenUrl::new_tab(repo_url));
             }
@@ -1609,6 +2240,7 @@ impl TruePeaksApp {
                 )
                 .clicked()
                 {
+                    self.refresh_log_preview_from_snapshot();
                     self.active_view = ActiveView::Analyzer;
                 }
             });
@@ -1748,6 +2380,22 @@ impl TruePeaksApp {
             &[],
         );
 
+        ui.add_space(10.0);
+        math_section_card(
+            ui,
+            ctx,
+            &mut self.math_svg_cache,
+            pal,
+            accent_text,
+            "8. Stereo Phase Correlation & ReplayGain 2.0",
+            "For multi-channel audio, TruePeaks computes the Pearson correlation coefficient r_LR in [-1, 1] between Left and Right channels and derives ReplayGain 2.0 track gain against the standard -18.0 LUFS target.",
+            math_assets::SECTION_8,
+            &[
+                ("Pearson Correlation", "https://en.wikipedia.org/wiki/Pearson_correlation_coefficient"),
+                ("ReplayGain", "https://en.wikipedia.org/wiki/ReplayGain"),
+            ],
+        );
+
         ui.add_space(16.0);
         ui.horizontal_wrapped(|ui| {
             if back_button(
@@ -1776,6 +2424,7 @@ impl TruePeaksApp {
                 )
                 .clicked()
                 {
+                    self.refresh_log_preview_from_snapshot();
                     self.active_view = ActiveView::Analyzer;
                 }
             });
@@ -1872,6 +2521,8 @@ impl TruePeaksApp {
                 {
                     self.config = AppConfig::default();
                     self.max_len_input = self.config.log_filenames.max_length.to_string();
+                    self.visual_state.tab =
+                        ResultsViewTab::from_default(self.config.default_results_view);
                     ctx.set_theme(to_egui_theme_preference(self.config.theme));
                     self.reset_window_geometry(ctx);
                     config_changed = true;
@@ -1988,6 +2639,51 @@ impl TruePeaksApp {
                 setting_row(
                     ui,
                     pal,
+                    "Default Analysis View",
+                    "Initial results view shown on launch (Visual View or Text Log)",
+                    "Choose whether completed scans open in the interactive Visual View (default) or the formatted Text Log.",
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            for &view_pref in DefaultResultsView::all() {
+                                let selected = self.config.default_results_view == view_pref;
+                                let btn = egui::Button::new(
+                                    RichText::new(view_pref.label()).color(if selected {
+                                        pal.pill_active_text
+                                    } else {
+                                        pal.pill_inactive_text
+                                    }),
+                                )
+                                .fill(if selected {
+                                    pal.pill_active_fill
+                                } else {
+                                    pal.pill_inactive_fill
+                                })
+                                .stroke(Stroke::new(
+                                    1.0_f32,
+                                    if selected {
+                                        pal.pill_active_fill
+                                    } else {
+                                        pal.pill_inactive_border
+                                    },
+                                ));
+                                if ui.add(btn).clicked() {
+                                    self.config.default_results_view = view_pref;
+                                    if self.current_snapshot.is_none() {
+                                        self.visual_state.tab =
+                                            ResultsViewTab::from_default(view_pref);
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        });
+                    },
+                );
+
+                ui.separator();
+
+                setting_row(
+                    ui,
+                    pal,
                     "Log Preview Font Size",
                     "Monospace scale for tables and track reports",
                     "Adjusts font size in the log viewer (10–22 pt). You can also use A- / A+ directly above any log.",
@@ -2077,13 +2773,16 @@ impl TruePeaksApp {
                     let selected = self.config.folder_log_style == style;
                     let tooltip = match style {
                         FolderLogStyle::TruePeaksTable => {
-                            "Customizable pipe-delimited multi-column spreadsheet supporting all 26 metrics (DR, TPL, LUFSi, LRA, PSR, PLR, RMS, and per-channel columns)."
+                            "Customizable pipe-delimited multi-column spreadsheet supporting all 31 metrics (DR, TPL, LUFSi, LRA, PSR, PLR, RMS, ReplayGain, Stereo Corr., TPL OS, and per-channel columns)."
                         }
                         FolderLogStyle::ClassicFooDr => {
-                            "Traditional Dynamic Range Meter style omitting the app/date header lines. Displays DR, Sample Peak dB, RMS dB, Duration, Track, Official DR value, Samplerate, Channels, Bits per sample, Bitrate, and Codec."
+                            "Traditional Dynamic Range Meter style omitting app/date headers. Defaults to DR, Peak, RMS, Duration, Track plus album codec footer, and supports adding/reordering any column."
                         }
                         FolderLogStyle::CompactMastering => {
-                            "Concise pure-ASCII mastering summary with top album averages (Summary DR, Peak, Avg LUFSi, Max TPL, Tracks & Time) and tightly left-aligned DR, Peak dB, TPL dBTP, LUFSi, PSR, Time, and Track columns."
+                            "Concise pure-ASCII mastering summary with top album averages and tightly aligned columns, fully customizable and reorderable."
+                        }
+                        FolderLogStyle::Json => {
+                            "Pretty-printed JSON document containing album summary metadata and customizable, reorderable per-track measurements for downstream scripts and pipelines."
                         }
                     };
                     if style_option_row(
@@ -2093,12 +2792,10 @@ impl TruePeaksApp {
                         style.label(),
                         style.description(),
                         tooltip,
-                    ) {
-                        if self.config.folder_log_style != style {
-                            self.config.folder_log_style = style;
-                            self.config.folder_columns = FolderColumnsConfig::for_style(style);
-                            changed = true;
-                        }
+                    ) && self.config.folder_log_style != style
+                    {
+                        self.config.switch_folder_log_style(style);
+                        changed = true;
                     }
                     ui.add_space(4.0);
                 }
@@ -2109,8 +2806,8 @@ impl TruePeaksApp {
         settings_card(
             ui,
             pal,
-            "Directory Scanning & Multi-Drop",
-            "Control nested subfolder recursion and how multiple dropped folders are saved.",
+            "Directory Scanning, Tags & Multi-Drop",
+            "Control nested subfolder recursion, embedded metadata track titles, and how multiple dropped folders are saved.",
             |ui| {
                 changed |= checkbox_row_tip(
                     ui,
@@ -2133,17 +2830,31 @@ impl TruePeaksApp {
                     "Default: dropping multiple album folders creates a separate log (e.g. DR.txt) in each folder and shows all results in the viewer. Turn on to merge them into a single combined batch log.",
                     pal,
                 );
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                changed |= checkbox_row_tip(
+                    ui,
+                    &mut self.config.use_embedded_tags,
+                    "Use embedded audio track titles (ID3 / Vorbis / MP4 tags)",
+                    "When enabled, folder tables and exports display track number + embedded tag title instead of raw filenames when available",
+                    "Falls back automatically to filename stem when tags are missing (useful for files with short IDs on disk or rich FLAC/ALAC tags).",
+                    pal,
+                );
             },
         );
 
         ui.add_space(12.0);
         let (active_cnt, total_cnt) = self.config.folder_columns.active_count();
         let current_style = self.config.folder_log_style;
+        let cache = &mut self.math_svg_cache;
         settings_card(
             ui,
             pal,
             "Summary Table Columns & Order",
-            "Select which fields appear in the folder log and arrange their left-to-right column order (applies to all 3 folder log styles).",
+            "Per-style column profiles are remembered independently when switching styles.",
             |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Presets:").strong().color(pal.text_muted));
@@ -2172,6 +2883,14 @@ impl TruePeaksApp {
                         changed = true;
                     }
                     if ui
+                        .button("JSON")
+                        .on_hover_text("JSON default fields: File Name, Duration, Format, Sample Rate, Word Length, Bits Used, DR (PMF), Max. TPL, Max. SPPM, RMS, LUFSi, LRA, Min. PSR, PLR, ReplayGain, Stereo Corr., TPL Oversample")
+                        .clicked()
+                    {
+                        self.config.folder_columns = FolderColumnsConfig::json_default();
+                        changed = true;
+                    }
+                    if ui
                         .button("Minimal DR")
                         .on_hover_text("Compact table: File Name, DR (PMF/L/R), Joint Max. TPL, Integrated Loudness")
                         .clicked()
@@ -2189,7 +2908,7 @@ impl TruePeaksApp {
                     }
                     if ui
                         .button("All Columns")
-                        .on_hover_text("Enable all 28 available columns")
+                        .on_hover_text("Enable all 31 available columns")
                         .clicked()
                     {
                         self.config.folder_columns = FolderColumnsConfig::all_enabled();
@@ -2218,7 +2937,7 @@ impl TruePeaksApp {
                         FolderColumnId::WordLength,
                         FolderColumnId::BitsUsed,
                     ] {
-                        changed |= col_pill_toggle(ui, cols, col_id, pal);
+                        changed |= col_pill_toggle(ui, ctx, cache, cols, col_id, pal);
                     }
                 });
 
@@ -2240,14 +2959,14 @@ impl TruePeaksApp {
                         FolderColumnId::RmsLeft,
                         FolderColumnId::RmsRight,
                     ] {
-                        changed |= col_pill_toggle(ui, cols, col_id, pal);
+                        changed |= col_pill_toggle(ui, ctx, cache, cols, col_id, pal);
                     }
                 });
 
                 ui.add_space(4.0);
                 ui.separator();
                 ui.label(
-                    RichText::new("Loudness (BS.1770-4) & Crest Ratios")
+                    RichText::new("Loudness (BS.1770-4), Ratios & Diagnostics")
                         .strong()
                         .size(13.0),
                 );
@@ -2263,8 +2982,11 @@ impl TruePeaksApp {
                         FolderColumnId::MaxShortTermRight,
                         FolderColumnId::Plr,
                         FolderColumnId::MinPsr,
+                        FolderColumnId::ReplayGainTrack,
+                        FolderColumnId::StereoCorrelation,
+                        FolderColumnId::TplOversample,
                     ] {
-                        changed |= col_pill_toggle(ui, cols, col_id, pal);
+                        changed |= col_pill_toggle(ui, ctx, cache, cols, col_id, pal);
                     }
                 });
 
@@ -2327,7 +3049,7 @@ impl TruePeaksApp {
                         if svg_nudge_button(
                             ui,
                             ctx,
-                            &mut self.math_svg_cache,
+                            cache,
                             "forward_arrow",
                             include_bytes!("../assets/forward_arrow.svg"),
                             can_right,
@@ -2345,7 +3067,7 @@ impl TruePeaksApp {
                         if svg_nudge_button(
                             ui,
                             ctx,
-                            &mut self.math_svg_cache,
+                            cache,
                             "back_arrow",
                             include_bytes!("../assets/back_arrow.svg"),
                             can_left,
@@ -2463,6 +3185,38 @@ impl TruePeaksApp {
             },
         );
 
+        let sample_tracks = if let Some(ref snap) = self.current_snapshot {
+            let t: Vec<TrackAnalysis> = snap.collect_tracks().into_iter().take(4).cloned().collect();
+            if t.is_empty() {
+                sample_preview_tracks()
+            } else {
+                t
+            }
+        } else {
+            sample_preview_tracks()
+        };
+        let preview_title = self
+            .current_snapshot
+            .as_ref()
+            .map(|s| s.title())
+            .unwrap_or_else(|| "Sample Album (Preview)".to_string());
+        let live_preview = format_folder_log_ex(
+            &preview_title,
+            &sample_tracks,
+            self.config.folder_log_style,
+            &self.config.folder_columns,
+            &self.config.log_filenames,
+            self.config.surround_folder_mode,
+            self.config.use_embedded_tags,
+        );
+        settings_live_preview_card(
+            ui,
+            pal,
+            "settings_live_preview_scroll",
+            "Updates immediately as you change styles, toggle metrics, or reorder columns.",
+            &live_preview,
+        );
+
         ui.add_space(12.0);
         settings_card(
             ui,
@@ -2502,6 +3256,9 @@ impl TruePeaksApp {
             },
         );
 
+        if changed {
+            self.config.sync_active_to_profile();
+        }
         changed
     }
 
@@ -2517,11 +3274,19 @@ impl TruePeaksApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Quick actions:").color(pal.text_muted));
             if ui
-                .button("Enable All (Default)")
+                .button("Standard 10 Rows (Default)")
                 .on_hover_text("Include all 10 standard single-file analysis rows")
                 .clicked()
             {
                 self.config.single_rows = SingleFileRowsConfig::default();
+                changed = true;
+            }
+            if ui
+                .button("All + Diagnostics")
+                .on_hover_text("Enable standard 10 rows plus ReplayGain, Stereo Correlation, and Peak Timing Diagnostics")
+                .clicked()
+            {
+                self.config.single_rows = SingleFileRowsConfig::all_with_diagnostics();
                 changed = true;
             }
         });
@@ -2557,7 +3322,7 @@ impl TruePeaksApp {
                     &mut rows.rms,
                     "RMS (AES17)",
                     "Sine-normalized Root Mean Square average level per channel (dBFS)",
-                    "Full-scale sine reads -0.00 dBFS (+3.01 dB relative to raw unweighted RMS) averaged across 3 s PMF blocks.",
+                    "Full-scale sine reads 0.00 dBFS (+3.01 dB relative to raw unweighted RMS) across the entire track.",
                     pal,
                 );
             },
@@ -2641,7 +3406,57 @@ impl TruePeaksApp {
                     "Overall track peak-to-loudness headroom indicator (reference peak capped at 0 dBTP when clipping).",
                     pal,
                 );
+                ui.separator();
+                changed |= checkbox_row_tip(
+                    ui,
+                    &mut rows.replay_gain,
+                    "ReplayGain 2.0 Track Gain (-18 LUFS reference)",
+                    "Recommended normalization gain offset in dB (-18.0 - LUFSi)",
+                    "Displays the exact ReplayGain 2.0 track gain needed to hit -18.0 LUFS.",
+                    pal,
+                );
+                ui.separator();
+                changed |= checkbox_row_tip(
+                    ui,
+                    &mut rows.stereo_correlation,
+                    "Stereo Phase Correlation (L/R Pearson r)",
+                    "Zero-lag Left/Right phase correlation in [-1.000, +1.000]",
+                    "+1.0 indicates mono/in-phase correlation; 0.0 indicates orthogonal stereo; negative values indicate out-of-phase energy.",
+                    pal,
+                );
+                ui.separator();
+                changed |= checkbox_row_tip(
+                    ui,
+                    &mut rows.peak_timing_diagnostics,
+                    "Peak Timestamp & TPL Oversampling Diagnostics",
+                    "Appends Max SPPM time, Min. PSR time, and TPL factor (4x/2x/1x)",
+                    "Useful for pinpointing the exact timestamp of peak overshoots and tightest dynamic squeeze.",
+                    pal,
+                );
             },
+        );
+
+        let sample_track = self
+            .current_snapshot
+            .as_ref()
+            .and_then(|snap| snap.collect_tracks().into_iter().next().cloned())
+            .unwrap_or_else(|| {
+                sample_preview_tracks()
+                    .into_iter()
+                    .next()
+                    .expect("sample preview tracks non-empty")
+            });
+        let single_preview = format_single_file_log(
+            &sample_track,
+            &self.config.single_rows,
+            &self.config.log_filenames,
+        );
+        settings_live_preview_card(
+            ui,
+            pal,
+            "settings_single_live_preview_scroll",
+            "Updates immediately as you toggle single-file rows or optional diagnostics.",
+            &single_preview,
         );
 
         changed
@@ -2712,6 +3527,42 @@ impl TruePeaksApp {
                         self.config.overwrite_existing_logs = true;
                         changed = true;
                     }
+
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    setting_row(
+                        ui,
+                        pal,
+                        "Custom Output Folder (Optional)",
+                        "Leave empty to save beside source audio; set a path for read-only drives or a central log archive",
+                        "When set, auto-saved logs are written inside this directory instead of beside the audio source files.",
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                changed |= ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut self.config.custom_output_dir)
+                                            .desired_width(145.0)
+                                            .hint_text("Beside source"),
+                                    )
+                                    .changed();
+                                if ui.button("Browse...").clicked() {
+                                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                                        self.config.custom_output_dir =
+                                            dir.to_string_lossy().to_string();
+                                        changed = true;
+                                    }
+                                }
+                                if !self.config.custom_output_dir.is_empty()
+                                    && ui.button("Clear").clicked()
+                                {
+                                    self.config.custom_output_dir.clear();
+                                    changed = true;
+                                }
+                            });
+                        },
+                    );
                 });
             },
         );
@@ -2934,8 +3785,42 @@ impl TruePeaksApp {
             },
         );
 
+        ui.add_space(12.0);
         changed
     }
+}
+
+fn settings_live_preview_card(
+    ui: &mut egui::Ui,
+    pal: &Palette,
+    scroll_id: &str,
+    subtitle: &str,
+    preview_text: &str,
+) {
+    ui.add_space(12.0);
+    settings_card(ui, pal, "Live Format Preview", subtitle, |ui| {
+        Frame::none()
+            .fill(pal.well)
+            .rounding(Rounding::same(6.0))
+            .stroke(Stroke::new(1.0_f32, pal.border))
+            .inner_margin(Margin::same(10.0))
+            .show(ui, |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt(scroll_id)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(preview_text)
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(pal.text_primary),
+                            )
+                            .extend(),
+                        );
+                    });
+            });
+    });
 }
 
 fn settings_section_header(ui: &mut egui::Ui, pal: &Palette, title: &str, subtitle: &str) {
@@ -3178,13 +4063,12 @@ fn math_section_card(
                         if idx > 0 {
                             ui.label(RichText::new("·").size(11.5).color(pal.text_muted));
                         }
-                        ui.hyperlink_to(
-                            RichText::new(format!("{} ↗", label))
-                                .size(11.5)
-                                .color(accent_text),
-                            *url,
-                        )
-                        .on_hover_text(*url);
+                        if svg_hyperlink(ui, ctx, cache, label, accent_text)
+                            .on_hover_text(*url)
+                            .clicked()
+                        {
+                            ctx.open_url(egui::OpenUrl::new_tab(*url));
+                        }
                     }
                 });
             }
@@ -3469,17 +4353,259 @@ fn paint_floating_drag_pill(
 
 fn col_pill_toggle(
     ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
     cols: &mut FolderColumnsConfig,
     col_id: FolderColumnId,
     pal: &Palette,
 ) -> bool {
     let mut active = cols.is_enabled(col_id);
-    if pill_toggle_tip(ui, col_id.label(), &mut active, pal, col_id.tooltip()) {
+    if pill_toggle_tip(
+        ui,
+        ctx,
+        cache,
+        col_id.label(),
+        &mut active,
+        pal,
+        col_id.tooltip(),
+    ) {
         cols.set_enabled(col_id, active);
         true
     } else {
         false
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn svg_icon_button_impl(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
+    icon_id: &'static str,
+    svg_bytes: &'static [u8],
+    label: &str,
+    min_height: f32,
+    fill: Color32,
+    stroke: Stroke,
+    fg: Color32,
+) -> egui::Response {
+    let font_id = FontId::proportional(13.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font_id, fg);
+    let icon_sz = 13.0_f32;
+    let gap = 5.0_f32;
+    let pad_x = 10.0_f32;
+    let width = pad_x * 2.0 + icon_sz + gap + galley.size().x;
+    let height = min_height.max(galley.size().y + 8.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    ui.painter().rect(rect, Rounding::same(6.0), fill, stroke);
+
+    let ppp = ctx.pixels_per_point().max(1.0);
+    let icon_min = egui::pos2(
+        ((rect.left() + pad_x) * ppp).round() / ppp,
+        ((rect.center().y - icon_sz * 0.5) * ppp).round() / ppp,
+    );
+    let icon_rect = egui::Rect::from_min_size(icon_min, Vec2::splat(icon_sz));
+    if let Some(tex) = cache.ui_icon_texture(ctx, icon_id, svg_bytes, icon_sz, ppp) {
+        ui.painter().image(
+            tex.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            fg,
+        );
+    }
+    let text_pos = egui::pos2(
+        icon_rect.right() + gap,
+        rect.center().y - galley.size().y * 0.5,
+    );
+    ui.painter().galley(text_pos, galley, fg);
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn svg_status_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
+    icon_id: &'static str,
+    svg_bytes: &'static [u8],
+    label: &str,
+    min_height: f32,
+    color: Color32,
+    pal: &Palette,
+) -> egui::Response {
+    svg_icon_button_impl(
+        ui,
+        ctx,
+        cache,
+        icon_id,
+        svg_bytes,
+        label,
+        min_height,
+        pal.surface_alt,
+        Stroke::new(1.0_f32, color),
+        color,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn svg_action_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
+    icon_id: &'static str,
+    svg_bytes: &'static [u8],
+    label: &str,
+    min_height: f32,
+    pal: &Palette,
+) -> egui::Response {
+    svg_icon_button_impl(
+        ui,
+        ctx,
+        cache,
+        icon_id,
+        svg_bytes,
+        label,
+        min_height,
+        pal.surface_alt,
+        Stroke::new(1.0_f32, pal.border),
+        pal.text_primary,
+    )
+}
+
+fn svg_hyperlink(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
+    label: &str,
+    color: Color32,
+) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), FontId::proportional(11.5), color);
+    let icon_sz = 10.5_f32;
+    let gap = 3.0_f32;
+    let w = galley.size().x + gap + icon_sz;
+    let h = galley.size().y.max(icon_sz) + 2.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+    ui.painter().galley(
+        egui::pos2(rect.left(), rect.center().y - galley.size().y * 0.5),
+        galley,
+        color,
+    );
+    let ppp = ctx.pixels_per_point().max(1.0);
+    let icon_min = egui::pos2(
+        ((rect.right() - icon_sz) * ppp).round() / ppp,
+        ((rect.center().y - icon_sz * 0.5) * ppp).round() / ppp,
+    );
+    let icon_rect = egui::Rect::from_min_size(icon_min, Vec2::splat(icon_sz));
+    if let Some(tex) = cache.ui_icon_texture(
+        ctx,
+        "external_link",
+        include_bytes!("../assets/external_link.svg"),
+        icon_sz,
+        ppp,
+    ) {
+        ui.painter().image(
+            tex.id(),
+            icon_rect,
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            color,
+        );
+    }
+    if resp.hovered() {
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left(), rect.bottom() - 1.0),
+                egui::pos2(rect.right(), rect.bottom() - 1.0),
+            ],
+            Stroke::new(1.0_f32, color),
+        );
+    }
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+fn sample_preview_tracks() -> Vec<TrackAnalysis> {
+    use crate::decoder::{AudioTags, SpeakerChannel};
+    vec![
+        TrackAnalysis {
+            file_stem: "01 - Opening Overture".into(),
+            file_format: ".flac".into(),
+            sample_rate: 44_100,
+            total_frames: 44_100 * 214,
+            file_size_bytes: 28_500_000,
+            channels: vec![SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight],
+            word_length: Some(24),
+            bits_used: Some(24),
+            max_tpl_channels: vec![-1.12, -1.24],
+            max_tpl_joint: -1.12,
+            tpl_oversample_factor: 4,
+            max_sppm_channels: vec![-1.20, -1.31],
+            max_sppm_joint: -1.20,
+            max_sppm_time_secs: 92.4,
+            rms_channels: vec![-16.40, -16.62],
+            max_mom_channels: vec![-10.8, -11.1],
+            max_mom_joint: -10.4,
+            max_short_term_channels: vec![-12.5, -12.8],
+            max_short_term_joint: -12.1,
+            integrated_lufs: -15.40,
+            replay_gain_track_db: Some(-2.60),
+            dr_channels: vec![12.14, 12.28],
+            dr_track_raw: 12.21,
+            dr_track_rounded: 12,
+            min_psr: 10.25,
+            min_psr_time_secs: Some(148.0),
+            plr: 14.28,
+            lra: 7.40,
+            stereo_correlation: Some(0.684),
+            tags: Some(AudioTags {
+                title: Some("Opening Overture".into()),
+                artist: Some("Sample Ensemble".into()),
+                album: Some("Sample Album".into()),
+                track_number: Some(1),
+            }),
+            timeline: Vec::new(),
+        },
+        TrackAnalysis {
+            file_stem: "02 - Electric Finale".into(),
+            file_format: ".flac".into(),
+            sample_rate: 44_100,
+            total_frames: 44_100 * 185,
+            file_size_bytes: 26_100_000,
+            channels: vec![SpeakerChannel::FrontLeft, SpeakerChannel::FrontRight],
+            word_length: Some(24),
+            bits_used: Some(24),
+            max_tpl_channels: vec![0.18, 0.04],
+            max_tpl_joint: 0.18,
+            tpl_oversample_factor: 4,
+            max_sppm_channels: vec![-0.02, -0.05],
+            max_sppm_joint: -0.02,
+            max_sppm_time_secs: 64.1,
+            rms_channels: vec![-11.20, -11.35],
+            max_mom_channels: vec![-7.9, -8.1],
+            max_mom_joint: -7.5,
+            max_short_term_channels: vec![-9.2, -9.4],
+            max_short_term_joint: -8.9,
+            integrated_lufs: -10.85,
+            replay_gain_track_db: Some(-7.15),
+            dr_channels: vec![8.12, 8.20],
+            dr_track_raw: 8.16,
+            dr_track_rounded: 8,
+            min_psr: 6.95,
+            min_psr_time_secs: Some(112.5),
+            plr: 10.85,
+            lra: 4.10,
+            stereo_correlation: Some(0.542),
+            tags: Some(AudioTags {
+                title: Some("Electric Finale".into()),
+                artist: Some("Sample Ensemble".into()),
+                album: Some("Sample Album".into()),
+                track_number: Some(2),
+            }),
+            timeline: Vec::new(),
+        },
+    ]
 }
 
 fn back_button(
@@ -3555,6 +4681,8 @@ fn back_button(
 
 fn pill_toggle_tip(
     ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    cache: &mut MathSvgCache,
     label: &str,
     active: &mut bool,
     pal: &Palette,
@@ -3574,18 +4702,61 @@ fn pill_toggle_tip(
         )
     };
 
-    let display = if *active {
-        format!("✓ {}", label)
+    let font_id = FontId::proportional(12.5);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font_id, text_color);
+    let icon_sz = 11.5_f32;
+    let icon_gap = 5.0_f32;
+    let pad_x = 10.0_f32;
+    let inner_w = if *active {
+        icon_sz + icon_gap + galley.size().x
     } else {
-        label.to_string()
+        galley.size().x
     };
+    let width = pad_x * 2.0 + inner_w;
+    let height = 24.0_f32.max(galley.size().y + 8.0);
 
-    let btn = egui::Button::new(RichText::new(display).color(text_color))
-        .fill(fill)
-        .stroke(stroke)
-        .rounding(Rounding::same(14.0));
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    ui.painter()
+        .rect(rect, Rounding::same(height * 0.5), fill, stroke);
 
-    if ui.add(btn).on_hover_text(tooltip).clicked() {
+    let mut text_x = rect.left() + pad_x;
+    if *active {
+        let ppp = ctx.pixels_per_point().max(1.0);
+        let icon_min = egui::pos2(
+            (text_x * ppp).round() / ppp,
+            ((rect.center().y - icon_sz * 0.5) * ppp).round() / ppp,
+        );
+        let icon_rect = egui::Rect::from_min_size(icon_min, Vec2::splat(icon_sz));
+        if let Some(tex) = cache.ui_icon_texture(
+            ctx,
+            "check",
+            include_bytes!("../assets/check.svg"),
+            icon_sz,
+            ppp,
+        ) {
+            ui.painter().image(
+                tex.id(),
+                icon_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                text_color,
+            );
+        }
+        text_x += icon_sz + icon_gap;
+    }
+
+    ui.painter().galley(
+        egui::pos2(text_x, rect.center().y - galley.size().y * 0.5),
+        galley,
+        text_color,
+    );
+
+    if resp
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(tooltip)
+        .clicked()
+    {
         *active = !*active;
         true
     } else {

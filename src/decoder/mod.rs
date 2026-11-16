@@ -1,3 +1,4 @@
+pub mod cue;
 pub mod symphonia_dec;
 pub mod w64_rf64_dec;
 
@@ -145,7 +146,7 @@ pub fn default_channel_layout(count: usize) -> Vec<SpeakerChannel> {
             SpeakerChannel::Lfe,
             SpeakerChannel::LeftRearSurround,
             SpeakerChannel::RightRearSurround,
-            SpeakerChannel::FrontCenter,
+            SpeakerChannel::Aux(6),
         ],
         8 => vec![
             SpeakerChannel::FrontLeft,
@@ -250,6 +251,14 @@ pub fn layout_description(channels: &[SpeakerChannel]) -> String {
     format!("{} ({})", prefix, labels.join(", "))
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AudioTags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub track_number: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AudioStreamMetadata {
     pub sample_rate: u32,
@@ -257,6 +266,7 @@ pub struct AudioStreamMetadata {
     pub word_length: Option<u32>,
     pub is_lossless_integer: bool,
     pub total_frames: Option<u64>,
+    pub tags: Option<AudioTags>,
 }
 
 #[derive(Debug)]

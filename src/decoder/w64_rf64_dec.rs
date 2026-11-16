@@ -83,6 +83,11 @@ impl W64Rf64Decoder {
             let payload_size = chunk_total_size - 24;
 
             if guid == W64_GUID_FMT {
+                if payload_size > 64 * 1024 {
+                    return Err(DecodeError::Format(
+                        "W64 fmt chunk exceeds maximum expected size".to_string(),
+                    ));
+                }
                 let mut fmt_bytes = vec![0u8; payload_size as usize];
                 reader.read_exact(&mut fmt_bytes)?;
                 fmt_parsed = Some(parse_wave_fmt(&fmt_bytes)?);
@@ -150,12 +155,22 @@ impl W64Rf64Decoder {
 
             if chunk_id == b"ds64" || chunk_id == b"JUNK" && ds64_data_size.is_none() {
                 if chunk_id == b"ds64" && chunk_size32 >= 28 {
+                    if chunk_size32 > 1024 * 1024 {
+                        return Err(DecodeError::Format(
+                            "RF64 ds64 chunk exceeds maximum expected size".to_string(),
+                        ));
+                    }
                     let mut ds64_buf = vec![0u8; chunk_size32 as usize];
                     reader.read_exact(&mut ds64_buf)?;
                     let data_sz = u64::from_le_bytes(ds64_buf[8..16].try_into().unwrap());
                     ds64_data_size = Some(data_sz);
                 }
             } else if chunk_id == b"fmt " {
+                if chunk_size32 > 64 * 1024 {
+                    return Err(DecodeError::Format(
+                        "WAVE fmt chunk exceeds maximum expected size".to_string(),
+                    ));
+                }
                 let mut fmt_bytes = vec![0u8; chunk_size32 as usize];
                 reader.read_exact(&mut fmt_bytes)?;
                 fmt_parsed = Some(parse_wave_fmt(&fmt_bytes)?);
@@ -248,7 +263,7 @@ fn parse_wave_fmt(
         }
     };
 
-    let bytes_per_sample = ((bits_per_sample + 7) / 8) as usize;
+    let bytes_per_sample = bits_per_sample.div_ceil(8) as usize;
     let channels = if channel_mask != 0 {
         channels_from_wave_mask(channel_mask, num_channels)
     } else {
@@ -269,6 +284,7 @@ fn parse_wave_fmt(
             word_length,
             is_lossless_integer,
             total_frames: None,
+            tags: None,
         },
         sample_type,
         bytes_per_sample,
@@ -327,15 +343,15 @@ impl ChunkedDecoder for W64Rf64Decoder {
             }
             (PcmSampleType::Int, 2) => {
                 let scale = 1.0 / 32768.0;
-                for b in self.raw_buf[..actual_frames * frame_stride].chunks_exact(2) {
-                    let s = i16::from_le_bytes([b[0], b[1]]);
+                for &b in self.raw_buf[..actual_frames * frame_stride].as_chunks::<2>().0 {
+                    let s = i16::from_le_bytes(b);
                     *bit_mask |= (s as i32 as u32) << 16;
                     out_interleaved.push((s as f64) * scale);
                 }
             }
             (PcmSampleType::Int, 3) => {
                 let scale = 1.0 / 8388608.0;
-                for b in self.raw_buf[..actual_frames * frame_stride].chunks_exact(3) {
+                for &b in self.raw_buf[..actual_frames * frame_stride].as_chunks::<3>().0 {
                     let s32_msb =
                         ((b[0] as i32) << 8) | ((b[1] as i32) << 16) | ((b[2] as i32) << 24);
                     *bit_mask |= s32_msb as u32;
@@ -345,21 +361,21 @@ impl ChunkedDecoder for W64Rf64Decoder {
             }
             (PcmSampleType::Int, 4) => {
                 let scale = 1.0 / 2147483648.0;
-                for b in self.raw_buf[..actual_frames * frame_stride].chunks_exact(4) {
-                    let s = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                for &b in self.raw_buf[..actual_frames * frame_stride].as_chunks::<4>().0 {
+                    let s = i32::from_le_bytes(b);
                     *bit_mask |= s as u32;
                     out_interleaved.push((s as f64) * scale);
                 }
             }
             (PcmSampleType::Float, 4) => {
-                for b in self.raw_buf[..actual_frames * frame_stride].chunks_exact(4) {
-                    let s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                for &b in self.raw_buf[..actual_frames * frame_stride].as_chunks::<4>().0 {
+                    let s = f32::from_le_bytes(b);
                     out_interleaved.push(s as f64);
                 }
             }
             (PcmSampleType::Float, 8) => {
-                for b in self.raw_buf[..actual_frames * frame_stride].chunks_exact(8) {
-                    let s = f64::from_le_bytes(b.try_into().unwrap());
+                for &b in self.raw_buf[..actual_frames * frame_stride].as_chunks::<8>().0 {
+                    let s = f64::from_le_bytes(b);
                     out_interleaved.push(s);
                 }
             }

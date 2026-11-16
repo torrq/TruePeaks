@@ -1,3 +1,4 @@
+pub mod export;
 pub mod folder_log;
 pub mod single_log;
 
@@ -10,8 +11,17 @@ use std::path::{Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthStr;
 
+pub fn format_timestamp_mmss(secs_f64: f64) -> String {
+    let total_tenths = (secs_f64.max(0.0) * 10.0).round() as u64;
+    let total_secs = total_tenths / 10;
+    let tenths = total_tenths % 10;
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    format!("{}:{:02}.{}", mins, secs, tenths)
+}
+
 pub fn format_sample_rate(sr: u32) -> String {
-    if sr % 1000 == 0 {
+    if sr.is_multiple_of(1000) {
         format!("{}k", sr / 1000)
     } else {
         format!("{:.1}k", (sr as f64) / 1000.0)
@@ -23,8 +33,9 @@ pub fn normalize_nfc(s: &str) -> String {
 }
 
 pub fn format_log_track_name(raw: &str, opts: &LogFilenameOptions) -> String {
+    let normalized = normalize_nfc(raw);
     let mut out = if opts.strip_non_ascii {
-        let ascii_only: String = raw
+        let ascii_only: String = normalized
             .chars()
             .filter(|c| c.is_ascii() && !c.is_ascii_control())
             .collect();
@@ -35,7 +46,7 @@ pub fn format_log_track_name(raw: &str, opts: &LogFilenameOptions) -> String {
             trimmed.to_string()
         }
     } else {
-        raw.to_string()
+        normalized
     };
 
     if opts.limit_length {
@@ -125,7 +136,7 @@ pub fn numbered_candidate_path(path: &Path, index: usize) -> PathBuf {
         .file_stem()
         .map(|s| s.to_string_lossy())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| std::borrow::Cow::Borrowed("DR"));
+        .unwrap_or(std::borrow::Cow::Borrowed("DR"));
     let numbered_name = match path.extension().map(|e| e.to_string_lossy()) {
         Some(ext) if !ext.is_empty() => format!("{}_{}.{}", stem, index, ext),
         _ => format!("{}_{}", stem, index),
@@ -183,6 +194,21 @@ pub fn write_log_file(
     }
 }
 
+fn sanitize_filename_component(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .trim_end_matches('.')
+        .to_string()
+}
+
 pub fn expand_filename_pattern(
     pattern: &str,
     folder_name: &str,
@@ -194,10 +220,12 @@ pub fn expand_filename_pattern(
     let date_str = now.format("%Y-%m-%d").to_string();
     let time_str = now.format("%H-%M-%S").to_string();
 
+    let safe_folder = sanitize_filename_component(folder_name);
     let mut out = pattern.to_string();
-    out = out.replace("{folder_name}", folder_name);
+    out = out.replace("{folder_name}", &safe_folder);
     if let Some(fn_str) = file_name {
-        out = out.replace("{file_name}", fn_str);
+        let safe_file = sanitize_filename_component(fn_str);
+        out = out.replace("{file_name}", &safe_file);
     }
     if let Some(ext_str) = ext {
         let clean_ext = ext_str.trim_start_matches('.');
