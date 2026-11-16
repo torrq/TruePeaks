@@ -1850,8 +1850,13 @@ impl TruePeaksApp {
                         && self.log_preview.is_empty()
                         && self.current_snapshot.is_none()
                     {
+                        let avail = ui.available_size();
+                        ui.set_min_size(avail);
+                        let top_pad = ((avail.y - 106.0) * 0.5).max(16.0);
                         ui.vertical_centered(|ui| {
-                            ui.add_space((ui.available_height() * 0.38).max(24.0));
+                            ui.add_space(top_pad);
+                            paint_waveform_badge(ui, 40.0, pal);
+                            ui.add_space(12.0);
                             ui.label(
                                 RichText::new(format!(
                                     "Analyzing {}...",
